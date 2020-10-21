@@ -32,6 +32,7 @@ class JavaThread;
 class JfrBuffer;
 class JfrStackFrame;
 class Thread;
+class SamplerSupport;
 
 class JfrThreadLocal {
  private:
@@ -42,6 +43,7 @@ class JfrThreadLocal {
   JfrBuffer* _load_barrier_buffer_epoch_0;
   JfrBuffer* _load_barrier_buffer_epoch_1;
   mutable JfrStackFrame* _stackframes;
+  mutable SamplerSupport* _sampler_support;
   mutable traceid _trace_id;
   JfrBlobHandle _thread;
   u8 _data_lost;
@@ -59,6 +61,7 @@ class JfrThreadLocal {
   JfrBuffer* install_native_buffer() const;
   JfrBuffer* install_java_buffer() const;
   JfrStackFrame* install_stackframes() const;
+  SamplerSupport* install_sampler_support() const;
   void release(Thread* t);
   static void release(JfrThreadLocal* tl, Thread* t);
 
@@ -121,6 +124,10 @@ class JfrThreadLocal {
 
   void set_stackdepth(u4 depth) {
     _stackdepth = depth;
+  }
+
+  SamplerSupport* sampler_support() const {
+    return _sampler_support != NULL ? _sampler_support : install_sampler_support();
   }
 
   traceid thread_id() const {

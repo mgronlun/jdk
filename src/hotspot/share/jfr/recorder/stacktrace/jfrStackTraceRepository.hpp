@@ -25,13 +25,15 @@
 #ifndef SHARE_JFR_RECORDER_STACKTRACE_JFRSTACKTRACEREPOSITORY_HPP
 #define SHARE_JFR_RECORDER_STACKTRACE_JFRSTACKTRACEREPOSITORY_HPP
 
-#include "jfr/recorder/stacktrace/jfrStackTrace.hpp"
 #include "jfr/utilities/jfrAllocation.hpp"
 #include "jfr/utilities/jfrTypes.hpp"
 
 class JavaThread;
 class JfrCheckpointWriter;
 class JfrChunkWriter;
+class JfrStackFrame;
+class JfrStackTrace;
+class Thread;
 
 class JfrStackTraceRepository : public JfrCHeapObj {
   friend class JfrRecorder;

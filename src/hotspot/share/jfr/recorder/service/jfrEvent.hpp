@@ -26,6 +26,7 @@
 #define SHARE_JFR_RECORDER_SERVICE_JFREVENT_HPP
 
 #include "jfr/recorder/jfrEventSetting.inline.hpp"
+#include "jfr/recorder/service/jfrEventSampler.hpp"
 #include "jfr/recorder/stacktrace/jfrStackTraceRepository.hpp"
 #include "jfr/utilities/jfrTime.hpp"
 #include "jfr/utilities/jfrTypes.hpp"
@@ -78,7 +79,8 @@ class JfrEvent {
   {
     if (T::is_enabled()) {
       if (T::hasRateLimit) {
-        _started = JfrEventSamplerAccess::is_sampled(T::eventId);;
+        JfrEventSampler* sampler = JfrEventSampler::for_event(T::eventId);
+        _started = sampler != NULL ? sampler->should_sample() : true;
       } else {
         _started = true;
       }

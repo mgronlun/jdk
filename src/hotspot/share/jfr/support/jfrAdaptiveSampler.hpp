@@ -45,8 +45,8 @@ struct SamplerWindowParams {
 };
 
 class AdaptiveSampler : public JfrCHeapObj {
-  class Window;
  private:
+  class Window;
   Window* _window_0;
   Window* _window_1;
   Window* _active_window;
@@ -58,18 +58,22 @@ class AdaptiveSampler : public JfrCHeapObj {
   double _avg_samples;
   size_t _avg_count;
   volatile int _lock;
+
+  Window* active_window() const;
+  Window* idle_window(const Window* prev_window) const;
+  void install_new_window(const Window* prev_window, SamplerWindowParams next_window_params);
+  void rotate_window();
+
   void recalculate_averages(const Window* prev_window, SamplerWindowParams params);
   void recalculate_probability(SamplerWindowParams params);
-  Window* active_window();
-  Window* idle_window(const Window* prev_window);
-  void install_new_window(Window* prev_window, SamplerWindowParams next_window_params);
-  void update_parameters(Window* window, double probability, size_t samples_budget);
- public:
+
+ protected:
   AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt);
-  ~AdaptiveSampler();
+  virtual ~AdaptiveSampler();
   bool initialize();
+
+ public:
   bool should_sample();
-  void rotate_window();
   virtual SamplerWindowParams new_window_params() = 0;
 };
 
