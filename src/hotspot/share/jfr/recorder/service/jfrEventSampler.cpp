@@ -11,7 +11,7 @@ class JfrEventSamplers : public JfrCHeapObj {
   bool initialize() {
     for (int i = FIRST_EVENT_ID; i <= LAST_EVENT_ID; i++) {
       _samplers[i] = new T((JfrEventId)i);
-      if (_samplers[i] == NULL) {
+      if (_samplers[i] == NULL || !_samplers[i]->initialize()) {
         return false;
       }
     }
@@ -33,7 +33,7 @@ class JfrEventSamplers : public JfrCHeapObj {
 static jlong MIN_SAMPLES_PER_WINDOW = 20;
 static JfrEventSamplers<JfrEventSampler>* _samplers = NULL;
 
-bool JfrEventSampler::initialize() {
+bool JfrEventSampler::create() {
   assert(_samplers == NULL, "invariant");
   _samplers = new JfrEventSamplers<JfrEventSampler>();
   return _samplers != NULL && _samplers->initialize();
@@ -49,6 +49,10 @@ void JfrEventSampler::destroy() {
 JfrEventSampler::JfrEventSampler(JfrEventId event_id) :
     AdaptiveSampler(80, 160),
     _event_id(event_id) {}
+
+bool JfrEventSampler::initialize() {
+  return AdaptiveSampler::initialize();
+}
 
 SamplerWindowParams JfrEventSampler::new_window_params() {
   SamplerWindowParams params;

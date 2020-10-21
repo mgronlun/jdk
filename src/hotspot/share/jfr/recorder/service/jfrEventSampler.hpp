@@ -32,10 +32,11 @@ class JfrEventSampler : public AdaptiveSampler {
   friend class JfrRecorder;
  private:
   JfrEventId _event_id;
-  static bool initialize();
+  static bool create();
   static void destroy();
  public:
   JfrEventSampler(JfrEventId event_id);
+  bool initialize();
   SamplerWindowParams new_window_params();
   static JfrEventSampler* for_event(JfrEventId event_id);
 };

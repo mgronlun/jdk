@@ -39,8 +39,6 @@
  * is obeyed without highly over- or under-sampled winows.
  */
 
-class SamplerSupport;
-
 struct SamplerWindowParams {
   int64_t duration;
   int64_t sample_count;
@@ -52,19 +50,19 @@ class AdaptiveSampler : public JfrCHeapObj {
   Window* _window_0;
   Window* _window_1;
   Window* _active_window;
-  SamplerSupport* _sampler_support;
   const double _window_lookback_alpha;
   const double _budget_lookback_alpha;
   double _samples_budget;
   double _probability;
+  const size_t _budget_lookback_cnt;
   double _avg_samples;
   size_t _avg_count;
-  const size_t _budget_lookback_cnt;
-  volatile size_t _running_count;
   volatile int _lock;
-  void recalculate_averages(SamplerWindowParams params);
+  void recalculate_averages(const Window* prev_window, SamplerWindowParams params);
+  void recalculate_probability(SamplerWindowParams params);
   Window* active_window();
-  Window* install_new_window(Window* old);
+  Window* idle_window(const Window* prev_window);
+  void install_new_window(Window* prev_window, SamplerWindowParams next_window_params);
   void update_parameters(Window* window, double probability, size_t samples_budget);
  public:
   AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt);

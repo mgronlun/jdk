@@ -367,7 +367,7 @@ bool JfrRecorder::create_thread_sampling() {
 }
 
 bool JfrRecorder::create_event_sampler() {
-  return JfrEventSampler::initialize();
+  return JfrEventSampler::create();
 }
 
 void JfrRecorder::destroy_components() {
