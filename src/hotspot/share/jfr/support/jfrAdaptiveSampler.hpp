@@ -1,11 +1,31 @@
+/*
+* Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+* DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+*
+* This code is free software; you can redistribute it and/or modify it
+* under the terms of the GNU General Public License version 2 only, as
+* published by the Free Software Foundation.
+*
+* This code is distributed in the hope that it will be useful, but WITHOUT
+* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+* FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+* version 2 for more details (a copy is included in the LICENSE file that
+* accompanied this code).
+*
+* You should have received a copy of the GNU General Public License version
+* 2 along with this work; if not, write to the Free Software Foundation,
+* Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+*
+* Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+* or visit www.oracle.com if you need additional information or have any
+* questions.
+*
+*/
+
 #ifndef SHARE_JFR_SUPPORT_JFRADAPTIVESAMPLER_HPP
 #define SHARE_JFR_SUPPORT_JFRADAPTIVESAMPLER_HPP
 
-#include <cmath>
-
-#include "runtime/atomic.hpp"
-#include "runtime/mutex.hpp"
-#include "runtime/samplerSupport.hpp"
+#include "jfr/utilities/jfrAllocation.hpp"
 
 /**
  * The adaptive sampler is guaranteeing a maximum number of samples picked per a certain time interval.
@@ -19,101 +39,54 @@
  * is obeyed without highly over- or under-sampled winows.
  */
 
+class SamplerSupport;
+
 struct SamplerWindowParams {
-    jlong window_duration;
-    jlong samples_per_window;
+  int64_t duration;
+  int64_t sample_count;
 };
 
-class SamplerWindow : public CHeapObj<mtInternal> {
-    private:
-    const bool _sample_all;
-    const double _probability;
-    const SamplerWindowParams _params = {0, 0};
-    const size_t _samples_budget;
-    const jlong _start_ticks;
-    const jlong _end_ticks;
-
-    volatile size_t _running_count;
-    volatile size_t _sample_count;
-
-    static jlong jfr_ticks();
-
-    public:
-    SamplerWindow(SamplerWindowParams params, double probability, size_t samples_budget);
-    bool should_sample();
-
-    inline
-    const size_t sample_count() {
-        size_t count = Atomic::load(&_sample_count);
-        return (count <= _samples_budget) ? count : _samples_budget;
-    }
-
-    inline
-    const size_t total_count() {
-        return Atomic::load(&_running_count);
-    }
-
-    inline const SamplerWindowParams params() {
-        return _params;
-    }
-
-    /**
-     * Ratio between the requested and the measured window duration
-     */
-    inline
-    const double adjustment_factor() {
-        return (double)(_end_ticks - _start_ticks) / (jfr_ticks() - _start_ticks);
-    }
-
-    const double adjustment_factor(jlong window_duration_ms);
-
-    const bool is_expired();
-};
-
-class AdaptiveSampler : public CHeapObj<mtInternal> {
-    private:
-    static double compute_interval_alpha(size_t interval);
-
-    const double _window_lookback_alpha;
-    const size_t _budget_lookback_cnt;
-    const double _budget_lookback_alpha;
-
-    double _samples_budget;
-    double _probability;
-
-    double _avg_samples;
-    size_t _avg_count;
-
-    // synchronizes operations mutating the _window variable
-    Mutex _window_mutex;
-
-    SamplerWindow* _window;
-
-    // needs to be called under _window_mutex
-    void recalculate_averages(SamplerWindowParams current_params);
-    void rotate_window();
-
-    public:
-    AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt);
-    ~AdaptiveSampler();
-
-    bool should_sample();
-    virtual SamplerWindowParams new_window_params() = 0;
+class AdaptiveSampler : public JfrCHeapObj {
+  class Window;
+ private:
+  Window* _window_0;
+  Window* _window_1;
+  Window* _active_window;
+  SamplerSupport* _sampler_support;
+  const double _window_lookback_alpha;
+  const double _budget_lookback_alpha;
+  double _samples_budget;
+  double _probability;
+  double _avg_samples;
+  size_t _avg_count;
+  const size_t _budget_lookback_cnt;
+  volatile size_t _running_count;
+  volatile int _lock;
+  void recalculate_averages(SamplerWindowParams params);
+  Window* active_window();
+  Window* install_new_window(Window* old);
+  void update_parameters(Window* window, double probability, size_t samples_budget);
+ public:
+  AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt);
+  ~AdaptiveSampler();
+  bool initialize();
+  bool should_sample();
+  void rotate_window();
+  virtual SamplerWindowParams new_window_params() = 0;
 };
 
 class FixedRateSampler : public AdaptiveSampler {
-    private:
-    SamplerWindowParams _params;
+ private:
+  SamplerWindowParams _params;
+ public:
+  FixedRateSampler(jlong window_duration, jlong samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt) : AdaptiveSampler(window_lookback_cnt, budget_lookback_cnt) {
+    _params.sample_count = samples_per_window;
+    _params.duration = window_duration;
+  }
 
-    public:
-    FixedRateSampler(jlong window_duration, jlong samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt) : AdaptiveSampler(window_lookback_cnt, budget_lookback_cnt) {
-        _params.samples_per_window = samples_per_window;
-        _params.window_duration = window_duration;
-    }
-
-    inline SamplerWindowParams new_window_params() {
-        return _params;
-    }
+  SamplerWindowParams new_window_params() {
+    return _params;
+  }
 };
 
 #endif // SHARE_JFR_SUPPORT_JFRADAPTIVESAMPLER_HPP

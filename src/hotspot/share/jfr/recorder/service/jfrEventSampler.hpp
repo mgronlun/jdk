@@ -1,45 +1,43 @@
+/*
+ * Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+ * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ *
+ * This code is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 only, as
+ * published by the Free Software Foundation.
+ *
+ * This code is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * version 2 for more details (a copy is included in the LICENSE file that
+ * accompanied this code).
+ *
+ * You should have received a copy of the GNU General Public License version
+ * 2 along with this work; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+ *
+ * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+ * or visit www.oracle.com if you need additional information or have any
+ * questions.
+ *
+ */
+
 #ifndef SHARE_JFR_SUPPORT_JFREVENTSAMPLER_HPP
 #define SHARE_JFR_SUPPORT_JFREVENTSAMPLER_HPP
 
+#include "jfrfiles/jfrEventIds.hpp"
 #include "jfr/support/jfrAdaptiveSampler.hpp"
 
-template <typename T>
-class JfrEventSamplers : public CHeapObj<mtInternal> {
-  private:
-  T* _samplers[LAST_EVENT_ID + 1];
-
-  public:
-  JfrEventSamplers() {
-    for (int i = FIRST_EVENT_ID; i <= LAST_EVENT_ID; i++) {
-      _samplers[i] = new T((JfrEventId)i);
-    }
-  }
-  ~JfrEventSamplers() {
-    for (int i = 0; i <= LAST_EVENT_ID; i++) {
-      delete _samplers[i];
-      _samplers[i] = NULL;
-    }
-  }
-
-  T* get_sampler(JfrEventId event_id) {
-    return _samplers[event_id];
-  }
-};
-
 class JfrEventSampler : public AdaptiveSampler {
-  private:
-  static jlong MIN_SAMPLES_PER_WINDOW;
-  static JfrEventSamplers<JfrEventSampler>* _samplers;
-
+  friend class JfrRecorder;
+ private:
   JfrEventId _event_id;
-
-  public:
-  JfrEventSampler(JfrEventId event_id) : AdaptiveSampler(80, 160), _event_id(event_id) {}
-
+  static bool initialize();
+  static void destroy();
+ public:
+  JfrEventSampler(JfrEventId event_id);
   SamplerWindowParams new_window_params();
-
   static JfrEventSampler* for_event(JfrEventId event_id);
-  static void initialize();
 };
 
 #endif // SHARE_JFR_SUPPORT_JFREVENTSAMPLER_HPP

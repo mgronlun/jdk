@@ -1,9 +1,54 @@
 #include "precompiled.hpp"
 #include "jfr/recorder/jfrEventSetting.inline.hpp"
 #include "jfr/recorder/service/jfrEventSampler.hpp"
+#include "jfr/utilities/jfrAllocation.hpp"
 
-jlong JfrEventSampler::MIN_SAMPLES_PER_WINDOW = 20;
-JfrEventSamplers<JfrEventSampler>* JfrEventSampler::_samplers;
+template <typename T>
+class JfrEventSamplers : public JfrCHeapObj {
+ private:
+  T* _samplers[LAST_EVENT_ID + 1];
+ public:
+  bool initialize() {
+    for (int i = FIRST_EVENT_ID; i <= LAST_EVENT_ID; i++) {
+      _samplers[i] = new T((JfrEventId)i);
+      if (_samplers[i] == NULL) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  ~JfrEventSamplers() {
+    for (int i = 0; i <= LAST_EVENT_ID; i++) {
+      delete _samplers[i];
+      _samplers[i] = NULL;
+    }
+  }
+
+  T* get_sampler(JfrEventId event_id) {
+    return _samplers[event_id];
+  }
+};
+
+static jlong MIN_SAMPLES_PER_WINDOW = 20;
+static JfrEventSamplers<JfrEventSampler>* _samplers = NULL;
+
+bool JfrEventSampler::initialize() {
+  assert(_samplers == NULL, "invariant");
+  _samplers = new JfrEventSamplers<JfrEventSampler>();
+  return _samplers != NULL && _samplers->initialize();
+}
+
+void JfrEventSampler::destroy() {
+  if (_samplers != NULL) {
+    delete _samplers;
+    _samplers = NULL;
+  }
+}
+
+JfrEventSampler::JfrEventSampler(JfrEventId event_id) :
+    AdaptiveSampler(80, 160),
+    _event_id(event_id) {}
 
 SamplerWindowParams JfrEventSampler::new_window_params() {
   SamplerWindowParams params;
@@ -17,18 +62,13 @@ SamplerWindowParams JfrEventSampler::new_window_params() {
     duration *= (MIN_SAMPLES_PER_WINDOW / samples);
     samples = MIN_SAMPLES_PER_WINDOW;
   }
-  params.window_duration = (jlong)duration;
-  params.samples_per_window = (jlong)samples;
+  params.duration = (jlong)duration;
+  params.sample_count = (jlong)samples;
 
   return params;
 }
 
-void JfrEventSampler::initialize() {
-  // needs to be called when VM/JFR is ready
-  _samplers = new JfrEventSamplers<JfrEventSampler>();
-}
-
 JfrEventSampler* JfrEventSampler::for_event(JfrEventId event_id) {
   assert(_samplers != NULL, "JfrEventSampler has not been properly initialized");
-  return _samplers != NULL ? _samplers->get_sampler(event_id) : NULL;
+  return _samplers->get_sampler(event_id);
 }

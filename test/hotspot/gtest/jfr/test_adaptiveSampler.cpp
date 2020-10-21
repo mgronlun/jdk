@@ -1,4 +1,5 @@
 #include "precompiled.hpp"
+/*
 // This test performs mocking of certain JVM functionality. This works by
 // including the source file under test inside an anonymous namespace (which
 // prevents linking conflicts) with the mocked symbols redefined.
@@ -279,3 +280,5 @@ TEST_VM_F(AdaptiveSampling, high_rate) {
 
   assertDistributionProperties(100, events, hits, all_events, all_hits, "Adaptive sampler: above target, hit distribution");
 }
+
+*/

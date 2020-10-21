@@ -1,42 +1,131 @@
+/*
+* Copyright (c) 2020, Oracle and/or its affiliates. All rights reserved.
+* DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+*
+* This code is free software; you can redistribute it and/or modify it
+* under the terms of the GNU General Public License version 2 only, as
+* published by the Free Software Foundation.
+*
+* This code is distributed in the hope that it will be useful, but WITHOUT
+* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+* FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+* version 2 for more details (a copy is included in the LICENSE file that
+* accompanied this code).
+*
+* You should have received a copy of the GNU General Public License version
+* 2 along with this work; if not, write to the Free Software Foundation,
+* Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+*
+* Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
+* or visit www.oracle.com if you need additional information or have any
+* questions.
+*
+*/
+
 #include "precompiled.hpp"
 #include "jfr/support/jfrAdaptiveSampler.hpp"
 #include "jfr/utilities/jfrTime.hpp"
 #include "jfr/utilities/jfrTimeConverter.hpp"
-#include "runtime/mutexLocker.hpp"
+#include "jfr/utilities/jfrTryLock.hpp"
+#include "runtime/atomic.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
+#include "runtime/samplerSupport.hpp"
 #include "utilities/globalDefinitions.hpp"
+#include <cmath>
 
-namespace {
-  static THREAD_LOCAL SamplerSupport* _sampler_support = NULL;
+/*
+inline
+const size_t total_count() {
+  return Atomic::load(&_running_count);
+}
+*/
 
-  static SamplerSupport* get_sampler_support() {
-    if (!_sampler_support) {
-      _sampler_support = NEW_C_HEAP_OBJ(SamplerSupport, mtInternal);
-      ::new (_sampler_support) SamplerSupport(true);
-    }
-    return _sampler_support;
+static SamplerSupport* _sampler_support = NULL;
+
+static SamplerSupport* get_sampler_support() {
+  assert(_sampler_support != NULL, "invariant");
+  return _sampler_support;
+}
+
+inline int64_t millis_to_countertime(int64_t millis) {
+  return JfrTimeConverter::nanos_to_countertime(millis * 1000000);
+}
+
+inline int64_t now() {
+  return JfrTicks::now().value();
+}
+
+class AdaptiveSampler::Window : public JfrCHeapObj {
+  friend class AdaptiveSampler;
+ private:
+  const SamplerWindowParams _params = { -1, -1 };
+  const int64_t _start_ticks;
+  const int64_t _end_ticks;
+  double _probability;
+  size_t _samples_budget;
+  volatile size_t _sample_count;
+  Window(double probablity, size_t samples_budget);
+ public:
+  Window(SamplerWindowParams params, double probability, size_t samples_budget);
+  bool should_sample();
+  bool should_sample(int64_t timestamp, bool* is_expired);
+
+  size_t sample_count() const {
+    const size_t count = Atomic::load(&_sample_count);
+    return count < _samples_budget ? count : _samples_budget;
   }
-}
 
-SamplerWindow::SamplerWindow(SamplerWindowParams params, double probability, size_t samples_budget) :
-  _sample_all(probability == 1.0), _probability(probability), _params(params), _samples_budget(samples_budget), _start_ticks(params.window_duration == -1 ? 0 : jfr_ticks()), _end_ticks(params.window_duration == -1 ? 0 : _start_ticks + JfrTimeConverter::nanos_to_countertime(params.window_duration * 1000000)) {
-  Atomic::store(&_running_count, (size_t)0);
-  Atomic::store(&_sample_count, (size_t)0);
-}
+  const SamplerWindowParams params() const {
+    return _params;
+  }
 
-jlong SamplerWindow::jfr_ticks() {
-  return ((jlong (*)())JfrTime::time_function())();
-}
+  /**
+   * Ratio between the requested and the measured window duration
+   */
+   double adjustment_factor() const {
+    return (double)(_end_ticks - _start_ticks / now() - _start_ticks);
+  }
 
-bool SamplerWindow::should_sample() {
-  Atomic::inc(&_running_count, memory_order_acq_rel);
-  if (_sample_all) {
+  double adjustment_factor(jlong window_duration_ms) const;
+  bool is_expired() const;
+
+  double probability() const {
+    return Atomic::load_acquire(&_probability);
+  }
+
+  void set_probability(double probability) {
+    Atomic::release_store(&_probability, probability);
+  }
+};
+
+AdaptiveSampler::Window::Window(SamplerWindowParams params, double probability, size_t samples_budget) :
+    _probability(probability),
+    _params(params),
+    _samples_budget(samples_budget),
+    _start_ticks(params.duration == -1 ? 0 : now()),
+    _end_ticks(params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(params.duration)),
+    _sample_count(0) {}
+
+AdaptiveSampler::Window::Window(double probability, size_t samples_budget) :
+  _probability(probability),
+  _samples_budget(samples_budget),
+  _start_ticks(_params.duration == -1 ? 0 : now()),
+  _end_ticks(_params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(_params.duration)),
+  _sample_count(0) {}
+
+//   Atomic::inc(&_running_count, memory_order_acq_rel);
+
+bool AdaptiveSampler::Window::should_sample() {
+  const double prob = probability();
+  const bool sample_all = prob == 1;
+  if (sample_all) {
     // if probability is 100% just ignore threshold and always pass
     if (Atomic::add(&_sample_count, (size_t)1, memory_order_acq_rel) <= _samples_budget) {
       return true;
     }
   } else {
-    double n_rand = _sample_all ? -1 : get_sampler_support()->next_random_uniform();
-    if (n_rand < _probability) {
+    const double n_rand = sample_all ? -1 : get_sampler_support()->next_random_uniform();
+    if (n_rand < prob) {
       if (Atomic::add(&_sample_count, (size_t)1, memory_order_acq_rel) <= _samples_budget) {
         return true;
       }
@@ -45,42 +134,100 @@ bool SamplerWindow::should_sample() {
   return false;
 }
 
-const bool SamplerWindow::is_expired() {
-  return jfr_ticks() >= _end_ticks;
+bool AdaptiveSampler::Window::should_sample(int64_t timestamp, bool* is_expired) {
+  assert(is_expired != NULL, "invariant");
+  *is_expired = timestamp >= _end_ticks;
+  if (*is_expired) {
+    return false;
+  }
+  const double prob = probability();
+  const bool sample_all = prob == 1;
+  if (sample_all) {
+    // if probability is 100% just ignore threshold and always pass
+    if (Atomic::add(&_sample_count, (size_t)1, memory_order_acq_rel) <= _samples_budget) {
+      return true;
+    }
+  } else {
+    const double n_rand = sample_all ? -1 : get_sampler_support()->next_random_uniform();
+    if (n_rand < prob) {
+      if (Atomic::add(&_sample_count, (size_t)1, memory_order_acq_rel) <= _samples_budget) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
-const double SamplerWindow::adjustment_factor(jlong window_duration_ms) {
-  return (double)JfrTimeConverter::nanos_to_countertime(window_duration_ms * 1000000) / (jfr_ticks() - _start_ticks);
+bool AdaptiveSampler::Window::is_expired() const {
+  return now() >= _end_ticks;
+}
+
+double AdaptiveSampler::Window::adjustment_factor(jlong window_duration_ms) const {
+  return (double)millis_to_countertime(window_duration_ms) / (now() - _start_ticks);
+}
+
+static double compute_interval_alpha(size_t interval) {
+  return 1 - std::pow(interval, (double)-1 / (double)interval);
 }
 
 AdaptiveSampler::AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt) :
-_window_lookback_alpha(compute_interval_alpha(window_lookback_cnt)), _budget_lookback_cnt(budget_lookback_cnt),
-_budget_lookback_alpha(compute_interval_alpha(budget_lookback_cnt)),
-_probability(1), _avg_count(0), _window_mutex(Mutex::special, "Sampler mutex", false, Mutex::_safepoint_check_never) {
-  SamplerWindowParams params = {-1, -1};
-  _samples_budget = params.samples_per_window * (1 + budget_lookback_cnt);
-  _avg_samples = std::numeric_limits<double>::quiet_NaN();
+    _window_0(NULL),
+    _window_1(NULL),
+    _active_window(NULL),
+    _sampler_support(NULL),
+    _window_lookback_alpha(compute_interval_alpha(window_lookback_cnt)),
+    _budget_lookback_cnt(budget_lookback_cnt),
+    _budget_lookback_alpha(compute_interval_alpha(budget_lookback_cnt)),
+    _samples_budget(-1 * (1 + budget_lookback_cnt)),
+    _probability(1),
+    _avg_samples(std::numeric_limits<double>::quiet_NaN()),
+    _avg_count(0),
+    _lock(0) {}
 
-  _window = NEW_C_HEAP_OBJ(SamplerWindow, mtInternal);
-  ::new (_window) SamplerWindow(params, _probability, _samples_budget);
+bool AdaptiveSampler::initialize() {
+  if (_sampler_support == NULL) {
+    _sampler_support = new SamplerSupport(true);
+    if (_sampler_support == NULL) {
+      return false;
+    }
+  }
+  assert(_sampler_support != NULL, "invariant");
+  assert(_window_0 == NULL, "invariant");
+  _window_0 = new Window(_probability, (size_t)_samples_budget);
+  if (_window_0 == NULL) {
+    return false;
+  }
+  assert(_window_1 == NULL, "invariant");
+  _window_1 = new Window(_probability, (size_t)_samples_budget);
+  if (_window_1 == NULL) {
+    return false;
+  }
+  _active_window = _window_0;
+  return true;
 }
 
-double AdaptiveSampler::compute_interval_alpha(size_t interval) {
-    return 1 - std::pow(interval, (double)-1 / (double)interval);
+AdaptiveSampler::~AdaptiveSampler() {
+  delete _window_0;
+  delete _window_1;
 }
 
-// needs to be called under _window_mutex
+AdaptiveSampler::Window* AdaptiveSampler::active_window() {
+  return Atomic::load_acquire(&_active_window);
+}
+
 void AdaptiveSampler::recalculate_averages(SamplerWindowParams new_params) {
-  SamplerWindowParams params = _window->params();
-  bool is_dummy = params.window_duration == -1;
-  double adjustment_factor = is_dummy ? _window->adjustment_factor(new_params.window_duration) : _window->adjustment_factor();
-  double samples = _window->sample_count() * adjustment_factor;
-  double total_count = _window->total_count() * adjustment_factor;
+  const Window* const window = active_window();
+  const SamplerWindowParams previous_params = window->params();
+  bool is_dummy = previous_params.duration == -1;
+  const double adjustment_factor = is_dummy ? window->adjustment_factor(new_params.duration) : window->adjustment_factor();
+  const double samples = window->sample_count() * adjustment_factor;
+  // double total_count = _window->total_count() * adjustment_factor;
+  double total_count = 0;
 
   if (!is_dummy) {
-  _avg_samples = std::isnan(_avg_samples) ? samples : _avg_samples + _budget_lookback_alpha * (samples - _avg_samples);
+    _avg_samples = std::isnan(_avg_samples) ? samples : _avg_samples + _budget_lookback_alpha * (samples - _avg_samples);
   }
-  _samples_budget = fmax<double>(new_params.samples_per_window - _avg_samples, 0) * _budget_lookback_cnt;
+  _samples_budget = fmax<double>(new_params.sample_count - _avg_samples, 0) * _budget_lookback_cnt;
 
   // fprintf(stdout, "=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_samples, samples, adjustment_factor);
 
@@ -92,37 +239,54 @@ void AdaptiveSampler::recalculate_averages(SamplerWindowParams new_params) {
   }
 }
 
+AdaptiveSampler::Window* AdaptiveSampler::install_new_window(AdaptiveSampler::Window* old) {
+  assert(old != NULL, "invariant");
+  assert(old == active_window(), "invariant");
+  Window* const next = old == _window_0 ? _window_1 : _window_0;
+  Atomic::release_store(&_active_window, next);
+  return next;
+}
+
+void AdaptiveSampler::update_parameters(AdaptiveSampler::Window* window, double probability, size_t samples_budget) {
+  assert(window != NULL, "invariant");
+  assert(window == active_window(), "invariant");
+  window->set_probability(probability);
+  window->_samples_budget = samples_budget;
+}
+
+// will be called only when the previous window has expired
+// exlusively by holder of try_lock
 void AdaptiveSampler::rotate_window() {
-  // will be called only when the previous window has expired
-  MutexLocker ml(&_window_mutex, Mutex::_no_safepoint_check_flag);
-  SamplerWindow* prev_window = _window;
-  if (_window != NULL && _window->is_expired()) { // re-check if expired when under mutex
-    SamplerWindowParams params = new_window_params();
-    recalculate_averages(params);
-
-    if (_avg_count == 0) {
-      _probability = 1;
-    } else {
-      double p = (params.samples_per_window + _samples_budget) / (double)_avg_count;
-      _probability = p <= 1 ? p : 1;
-    }
-
-    // fprintf(stdout, "=== rotate window: budget = %f, probability = %f\n", _samples_budget, _probability);
-    _window = NEW_C_HEAP_OBJ(SamplerWindow, mtInternal);
-    ::new (_window) SamplerWindow(params, _probability, _samples_budget);
-    delete prev_window;
+  Window* const previous = active_window();
+  if (!previous->is_expired()) {
+    // someone beat us to it
+    return;
   }
+  Window* const next = install_new_window(previous);
+  assert(previous->is_expired(), "invariant");
+  SamplerWindowParams params = new_window_params();
+  recalculate_averages(params);
+  if (_avg_count == 0) {
+    _probability = 1;
+  } else {
+    const double p = (params.sample_count + _samples_budget) / (double)_avg_count;
+    _probability = p < 1 ? p : 1;
+  }
+  update_parameters(next, _probability, _samples_budget);
 }
 
 bool AdaptiveSampler::should_sample() {
-  if (_window->is_expired()) {
-    rotate_window();
+  bool expired = false;
+  const int64_t timestamp = now();
+  bool sample = active_window()->should_sample(timestamp, &expired);
+  if (expired) {
+    {
+      JfrTryLock rotation_lock(&_lock);
+      if (rotation_lock.acquired()) {
+        rotate_window();
+      }
+    }
+    sample = active_window()->should_sample(timestamp, &expired);
   }
-  return _window->should_sample();
-}
-
-AdaptiveSampler::~AdaptiveSampler() {
-  MutexLocker ml(&_window_mutex, Mutex::_no_safepoint_check_flag);
-  delete _window;
-  _window = NULL;
+  return sample;
 }

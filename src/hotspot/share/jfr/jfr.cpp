@@ -52,7 +52,6 @@ void Jfr::on_create_vm_1() {
   if (!JfrRecorder::on_create_vm_1()) {
     vm_exit_during_initialization("Failure when starting JFR on_create_vm_1");
   }
-  JfrEventSampler::initialize();
 }
 
 void Jfr::on_create_vm_2() {
