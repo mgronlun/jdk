@@ -23,6 +23,7 @@
 */
 
 #include "precompiled.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "jfr/support/jfrAdaptiveSampler.hpp"
 #include "jfr/utilities/jfrTime.hpp"
 #include "jfr/utilities/jfrTimeConverter.hpp"
@@ -225,9 +226,11 @@ void AdaptiveSampler::rotate_window() {
     return;
   }
   const SamplerWindowParams new_params = new_window_params();
-  recalculate_averages(current_window, new_params);
-  recalculate_probability(new_params);
+  EventRetiredSampleWindow event;
+  recalculate_averages(current_window, new_params, event);
+  recalculate_probability(new_params, event);
   install_new_window(current_window, new_params);
+  event.commit();
 }
 
 /*
@@ -249,12 +252,51 @@ inline double derivative_exponentially_weighted_moving_average(double Y, double 
   return std::isnan(S) ? Y : S + alpha * (Y - S);
 }
 
-void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params) {
+void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params, EventRetiredSampleWindow& event) {
   assert(current_window != NULL, "invariant");
   assert(current_window == active_window(), "invariant");
   const SamplerWindowParams current_params = current_window->params();
   const bool is_dummy = current_params.duration == -1;
   const double adjustment_factor = is_dummy ? current_window->adjustment_factor(new_params.duration) : current_window->adjustment_factor();
+  const double samples_raw = current_window->output_count();
+  const double samples = samples_raw * adjustment_factor;
+  const double total_count_raw = current_window->input_count();
+  const double total_count = total_count_raw * adjustment_factor;
+
+  const double requested_ratio = (double)current_params.sample_count / (double)current_params.duration;
+
+  event.set_requested_ratio(requested_ratio);
+  event.set_samples_raw(samples_raw);
+  event.set_attempts_raw(total_count_raw);
+  event.set_raw_ratio(samples_raw / total_count_raw);
+  event.set_samples(samples);
+  event.set_attempts(total_count);
+  event.set_adjustment_factor(adjustment_factor);
+  event.set_adjusted_ratio(samples / total_count);
+  event.set_prev_probability(current_window->probability());
+  event.set_prev_avgSamples(_avg_output);
+  event.set_prev_avgAttempts(_avg_input);
+  event.set_prev_budget(current_window->_samples_budget);
+
+  if (!is_dummy) {
+    _avg_output = std::isnan(_avg_output) ? samples : _avg_output + _budget_lookback_alpha * (samples - _avg_output);
+  }
+  _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
+
+  printf("=== samples raw: %f, attempts_raw: %f, ratio: %f, prob: %f\n", samples_raw, total_count_raw, samples_raw / total_count_raw, current_window->probability());
+  printf("=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_output, samples, adjustment_factor);
+
+  if (_avg_input == 0) {
+    _avg_input = total_count;
+  } else {
+    // need to convert int '*_count' variables to double to prevent bit overflow
+    _avg_input = _avg_input + _window_lookback_alpha * ((double)total_count - (double)_avg_input);
+  }
+
+  event.set_new_avgSamples(_avg_output);
+  event.set_new_avgAttempts(_avg_input);
+
+  /*
   const double samples = current_window->output_count() * adjustment_factor;
   const double attempts = current_window->input_count() * adjustment_factor;
   if (!is_dummy) {
@@ -263,6 +305,7 @@ void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* curren
   _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
   printf("=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_output, samples, adjustment_factor);
   _avg_input = _avg_input == 0 ? attempts : derivative_exponentially_weighted_moving_average(attempts, _window_lookback_alpha, static_cast<double>(_avg_input));
+  */
 }
 
 /*
@@ -285,13 +328,15 @@ else {
 }
 */
 
-void AdaptiveSampler::recalculate_probability(SamplerWindowParams params) {
+void AdaptiveSampler::recalculate_probability(SamplerWindowParams params, EventRetiredSampleWindow& event) {
   if (_avg_input == 0) {
     _probability = 1;
     return;
   }
   const double p = (params.sample_count + _samples_budget) / static_cast<double>(_avg_input);
   _probability = p < 1 ? p : 1;
+  event.set_new_probability(_probability);
+  event.set_new_budget(_samples_budget);
 }
 
 inline AdaptiveSampler::Window* AdaptiveSampler::next_window(const AdaptiveSampler::Window* current_window) const {

@@ -44,6 +44,8 @@ struct SamplerWindowParams {
   int64_t sample_count;
 };
 
+class EventRetiredSampleWindow;
+
 class AdaptiveSampler : public JfrCHeapObj {
  private:
   class Window;
@@ -64,8 +66,8 @@ class AdaptiveSampler : public JfrCHeapObj {
   void install_new_window(const Window* current_window, SamplerWindowParams next_window_params);
   void rotate_window();
 
-  void recalculate_averages(const Window* current_window, SamplerWindowParams params);
-  void recalculate_probability(SamplerWindowParams params);
+  void recalculate_averages(const Window* current_window, SamplerWindowParams params, EventRetiredSampleWindow& event);
+  void recalculate_probability(SamplerWindowParams params, EventRetiredSampleWindow& event);
 
  protected:
   AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt);
