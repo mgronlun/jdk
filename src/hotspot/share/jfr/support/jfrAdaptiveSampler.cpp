@@ -81,11 +81,11 @@ class AdaptiveSampler::Window : public JfrCHeapObj {
    * Ratio between the requested and the measured window duration
    */
    double adjustment_factor() const {
-    return static_cast<double>((_end_ticks - _start_ticks) / (now() - _start_ticks));
+    return static_cast<double>(_end_ticks - _start_ticks) / static_cast<double>(now() - _start_ticks);
   }
   
   double adjustment_factor(int64_t window_duration_ms) const {
-    return static_cast<double>(millis_to_countertime(window_duration_ms) / (now() - _start_ticks));
+    return static_cast<double>(millis_to_countertime(window_duration_ms)) / static_cast<double>(now() - _start_ticks);
   }
 
   bool is_expired() const {
@@ -255,16 +255,35 @@ void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* curren
   const SamplerWindowParams current_params = current_window->params();
   const bool is_dummy = current_params.duration == -1;
   const double adjustment_factor = is_dummy ? current_window->adjustment_factor(new_params.duration) : current_window->adjustment_factor();
-  const double output = current_window->output_count() * adjustment_factor;
-  const double input = current_window->input_count() * adjustment_factor;
-
+  const double samples = current_window->output_count() * adjustment_factor;
+  const double attempts = current_window->input_count() * adjustment_factor;
   if (!is_dummy) {
-    _avg_output = derivative_exponentially_weighted_moving_average(output, _budget_lookback_alpha, _avg_output);
+    _avg_output = derivative_exponentially_weighted_moving_average(samples, _budget_lookback_alpha, _avg_output);
   }
   _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
-  // fprintf(stdout, "=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_samples, samples, adjustment_factor);
-  _avg_input = _avg_input == 0 ? input : derivative_exponentially_weighted_moving_average(input, _window_lookback_alpha, static_cast<double>(_avg_input));
+  printf("=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_output, samples, adjustment_factor);
+  _avg_input = _avg_input == 0 ? attempts : derivative_exponentially_weighted_moving_average(attempts, _window_lookback_alpha, static_cast<double>(_avg_input));
 }
+
+/*
+double samples = current_window->output_count() * adjustment_factor;
+double total_count = current_window->input_count() * adjustment_factor;
+
+if (!is_dummy) {
+  _avg_output = std::isnan(_avg_output) ? samples : _avg_output + _budget_lookback_alpha * (samples - _avg_output);
+}
+_samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
+
+printf("=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_output, samples, adjustment_factor);
+
+if (_avg_input == 0) {
+  _avg_input = total_count;
+}
+else {
+  // need to convert int '*_count' variables to double to prevent bit overflow
+  _avg_input = _avg_input + _window_lookback_alpha * ((double)total_count - (double)_avg_input);
+}
+*/
 
 void AdaptiveSampler::recalculate_probability(SamplerWindowParams params) {
   if (_avg_input == 0) {

@@ -24,12 +24,12 @@
 
 #include "precompiled.hpp"
 #include "gc/shared/allocTracer.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/handles.hpp"
 #include "utilities/globalDefinitions.hpp"
 #include "utilities/macros.hpp"
 #if INCLUDE_JFR
-#include "jfr/jfrEvents.hpp"
 #include "jfr/support/jfrAllocationTracer.hpp"
 #endif
 
