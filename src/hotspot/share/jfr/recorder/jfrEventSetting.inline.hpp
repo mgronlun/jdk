@@ -39,11 +39,11 @@ inline bool JfrEventSetting::has_stacktrace(JfrEventId event_id) {
   return 0 != setting(event_id).stacktrace;
 }
 
-inline jlong JfrEventSetting::threshold(JfrEventId event_id) {
+inline int64_t JfrEventSetting::threshold(JfrEventId event_id) {
   return setting(event_id).threshold_ticks;
 }
 
-inline jlong JfrEventSetting::cutoff(JfrEventId event_id) {
+inline int64_t JfrEventSetting::cutoff(JfrEventId event_id) {
   return setting(event_id).cutoff_ticks;
 }
 
@@ -51,7 +51,7 @@ inline bool JfrEventSetting::is_large(JfrEventId event_id) {
   return setting(event_id).large != 0;
 }
 
-inline jlong JfrEventSetting::ratelimit(JfrEventId event_id) {
+inline int64_t JfrEventSetting::ratelimit(JfrEventId event_id) {
   return setting(event_id).ratelimit;
 }
 #endif // SHARE_JFR_RECORDER_JFREVENTSETTING_INLINE_HPP

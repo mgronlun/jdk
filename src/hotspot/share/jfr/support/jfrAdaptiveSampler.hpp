@@ -54,17 +54,17 @@ class AdaptiveSampler : public JfrCHeapObj {
   const double _budget_lookback_alpha;
   double _samples_budget;
   double _probability;
+  double _avg_output;
   const size_t _budget_lookback_cnt;
-  double _avg_samples;
-  size_t _avg_count;
+  size_t _avg_input;
   volatile int _lock;
 
   Window* active_window() const;
-  Window* idle_window(const Window* prev_window) const;
-  void install_new_window(const Window* prev_window, SamplerWindowParams next_window_params);
+  Window* next_window(const Window* current_window) const;
+  void install_new_window(const Window* current_window, SamplerWindowParams next_window_params);
   void rotate_window();
 
-  void recalculate_averages(const Window* prev_window, SamplerWindowParams params);
+  void recalculate_averages(const Window* current_window, SamplerWindowParams params);
   void recalculate_probability(SamplerWindowParams params);
 
  protected:
@@ -81,7 +81,7 @@ class FixedRateSampler : public AdaptiveSampler {
  private:
   SamplerWindowParams _params;
  public:
-  FixedRateSampler(jlong window_duration, jlong samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt);
+  FixedRateSampler(int64_t window_duration, int64_t samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt);
   SamplerWindowParams new_window_params() {
     return _params;
   }

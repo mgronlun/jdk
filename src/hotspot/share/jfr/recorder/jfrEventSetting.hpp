@@ -25,7 +25,6 @@
 #ifndef SHARE_JFR_RECORDER_JFREVENTSETTING_HPP
 #define SHARE_JFR_RECORDER_JFREVENTSETTING_HPP
 
-#include "jni.h"
 #include "jfr/utilities/jfrAllocation.hpp"
 #include "jfrfiles/jfrEventControl.hpp"
 
@@ -38,20 +37,20 @@ class JfrEventSetting : AllStatic {
   static jfrNativeEventSetting& setting(JfrEventId event_id);
 
  public:
-  static void set_enabled(jlong event_id, bool enabled);
+  static void set_enabled(int64_t event_id, bool enabled);
   static bool is_enabled(JfrEventId event_id);
-  static void set_stacktrace(jlong event_id, bool enabled);
+  static void set_stacktrace(int64_t event_id, bool enabled);
   static bool has_stacktrace(JfrEventId event_id);
-  static bool set_threshold(jlong event_id, jlong threshold_ticks);
-  static jlong threshold(JfrEventId event_id);
-  static bool set_cutoff(jlong event_id, jlong cutoff_ticks);
-  static jlong cutoff(JfrEventId event_id);
+  static bool set_threshold(int64_t event_id, int64_t threshold_ticks);
+  static int64_t threshold(JfrEventId event_id);
+  static bool set_cutoff(int64_t event_id, int64_t cutoff_ticks);
+  static int64_t cutoff(JfrEventId event_id);
   static bool is_large(JfrEventId event_id);
   static void set_large(JfrEventId event_id);
-  static bool set_ratelimit(jlong event_id, jlong ratelimit);
-  static jlong ratelimit(JfrEventId event_id);
+  static bool set_ratelimit(int64_t event_id, int64_t ratelimit);
+  static int64_t ratelimit(JfrEventId event_id);
 
-  DEBUG_ONLY(static bool bounds_check_event(jlong id);)
+  DEBUG_ONLY(static bool bounds_check_event(int64_t id);)
 };
 
 #endif // SHARE_JFR_RECORDER_JFREVENTSETTING_HPP

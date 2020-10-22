@@ -10,7 +10,7 @@ class JfrEventSamplers : public JfrCHeapObj {
  public:
   bool initialize() {
     for (int i = FIRST_EVENT_ID; i <= LAST_EVENT_ID; i++) {
-      _samplers[i] = new T((JfrEventId)i);
+      _samplers[i] = new T(static_cast<JfrEventId>(i));
       if (_samplers[i] == NULL || !_samplers[i]->initialize()) {
         return false;
       }
@@ -30,7 +30,14 @@ class JfrEventSamplers : public JfrCHeapObj {
   }
 };
 
-static jlong MIN_SAMPLES_PER_WINDOW = 20;
+JfrEventSampler::JfrEventSampler(JfrEventId event_id) :
+    AdaptiveSampler(80, 160),
+    _event_id(event_id) {}
+
+bool JfrEventSampler::initialize() {
+  return AdaptiveSampler::initialize();
+}
+
 static JfrEventSamplers<JfrEventSampler>* _samplers = NULL;
 
 bool JfrEventSampler::create() {
@@ -46,29 +53,21 @@ void JfrEventSampler::destroy() {
   }
 }
 
-JfrEventSampler::JfrEventSampler(JfrEventId event_id) :
-    AdaptiveSampler(80, 160),
-    _event_id(event_id) {}
-
-bool JfrEventSampler::initialize() {
-  return AdaptiveSampler::initialize();
-}
+static int64_t MIN_SAMPLES_PER_WINDOW = 20;
 
 SamplerWindowParams JfrEventSampler::new_window_params() {
-  SamplerWindowParams params;
-  jlong limit = JfrEventSetting::ratelimit(_event_id);
+  const int64_t rate_limit = JfrEventSetting::ratelimit(_event_id);
   // a simple heuristic to derive the window size and number of samples per window from the provided rate limit
   double duration = 10; // start with 10ms window
-  double samples = (duration * limit) / (double)1000; // duration is in milliseconds and limit in samples per second
+  // duration is in milliseconds and rate_limit in samples per second
+  double samples = (duration * rate_limit) / static_cast<double>(1000);
   // rebalance if too few samples are to be generated per window
   if (samples < MIN_SAMPLES_PER_WINDOW) {
     // target at least MIN_SAMPLES_PER_WINDOW samples per window
     duration *= (MIN_SAMPLES_PER_WINDOW / samples);
     samples = MIN_SAMPLES_PER_WINDOW;
   }
-  params.duration = (jlong)duration;
-  params.sample_count = (jlong)samples;
-
+  SamplerWindowParams params = { static_cast<int64_t>(duration), static_cast<int64_t>(samples) };
   return params;
 }
 

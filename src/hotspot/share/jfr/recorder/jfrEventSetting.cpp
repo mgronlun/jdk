@@ -27,27 +27,27 @@
 
 JfrNativeSettings JfrEventSetting::_jvm_event_settings;
 
-bool JfrEventSetting::set_threshold(jlong id, jlong threshold_ticks) {
+bool JfrEventSetting::set_threshold(int64_t id, int64_t threshold_ticks) {
   JfrEventId event_id = (JfrEventId)id;
   assert(bounds_check_event(event_id), "invariant");
   setting(event_id).threshold_ticks = threshold_ticks;
   return true;
 }
 
-bool JfrEventSetting::set_cutoff(jlong id, jlong cutoff_ticks) {
+bool JfrEventSetting::set_cutoff(int64_t id, int64_t cutoff_ticks) {
   JfrEventId event_id = (JfrEventId)id;
   assert(bounds_check_event(event_id), "invariant");
   setting(event_id).cutoff_ticks = cutoff_ticks;
   return true;
 }
 
-void JfrEventSetting::set_stacktrace(jlong id, bool enabled) {
+void JfrEventSetting::set_stacktrace(int64_t id, bool enabled) {
   JfrEventId event_id = (JfrEventId)id;
   assert(bounds_check_event(event_id), "invariant");
   setting(event_id).stacktrace = enabled;
 }
 
-void JfrEventSetting::set_enabled(jlong id, bool enabled) {
+void JfrEventSetting::set_enabled(int64_t id, bool enabled) {
   JfrEventId event_id = (JfrEventId)id;
   assert(bounds_check_event(event_id), "invariant");
   setting(event_id).enabled = enabled;
@@ -58,7 +58,7 @@ void JfrEventSetting::set_large(JfrEventId event_id) {
   setting(event_id).large = true;
 }
 
-bool JfrEventSetting::set_ratelimit(jlong id, jlong ratelimit) {
+bool JfrEventSetting::set_ratelimit(int64_t id, int64_t ratelimit) {
   JfrEventId event_id = (JfrEventId)id;
   assert(bounds_check_event(event_id), "invariant");
   setting(event_id).ratelimit = ratelimit;
@@ -66,7 +66,7 @@ bool JfrEventSetting::set_ratelimit(jlong id, jlong ratelimit) {
 }
 
 #ifdef ASSERT
-bool JfrEventSetting::bounds_check_event(jlong id) {
+bool JfrEventSetting::bounds_check_event(int64_t id) {
   if ((unsigned)id < FIRST_EVENT_ID) {
     return false;
   }

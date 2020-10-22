@@ -27,6 +27,7 @@
 #include "jfr/utilities/jfrTime.hpp"
 #include "jfr/utilities/jfrTimeConverter.hpp"
 #include "jfr/utilities/jfrTryLock.hpp"
+#include "logging/log.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/thread.inline.hpp"
@@ -49,8 +50,8 @@ class AdaptiveSampler::Window : public JfrCHeapObj {
   int64_t _end_ticks;
   double _probability;
   size_t _samples_budget;
-  volatile size_t _running_count;
-  volatile size_t _sample_count;
+  volatile size_t _output_count;
+  volatile size_t _input_count;
 
   Window(double probablity, size_t samples_budget);
   void reinitialize(double probability, size_t samples_budget, SamplerWindowParams params);
@@ -59,13 +60,13 @@ class AdaptiveSampler::Window : public JfrCHeapObj {
   bool enter();
   bool random_trial();
 
-  size_t sample_count() const {
-    const size_t count = Atomic::load(&_sample_count);
+  size_t output_count() const {
+    const size_t count = Atomic::load(&_output_count);
     return count < _samples_budget ? count : _samples_budget;
   }
 
-  size_t total_count() const {
-    return Atomic::load(&_running_count);
+  size_t input_count() const {
+    return Atomic::load(&_input_count);
   }
 
   const SamplerWindowParams params() const {
@@ -83,7 +84,7 @@ class AdaptiveSampler::Window : public JfrCHeapObj {
     return static_cast<double>((_end_ticks - _start_ticks) / (now() - _start_ticks));
   }
   
-  double adjustment_factor(jlong window_duration_ms) const {
+  double adjustment_factor(int64_t window_duration_ms) const {
     return static_cast<double>(millis_to_countertime(window_duration_ms) / (now() - _start_ticks));
   }
 
@@ -101,15 +102,15 @@ AdaptiveSampler::Window::Window(double probability, size_t samples_budget) :
     _end_ticks(_params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(_params.duration)),
     _probability(probability),
     _samples_budget(samples_budget),
-    _running_count(0),
-    _sample_count(0) {}
+    _output_count(0),
+    _input_count(0) {}
 
 void AdaptiveSampler::Window::reinitialize(double probability, size_t samples_budget, SamplerWindowParams params) {
   _probability = probability;
-  Atomic::store(&_running_count, static_cast<size_t>(0));
-  Atomic::store(&_sample_count, static_cast<size_t>(0));
-  _params = params;
+  Atomic::store(&_output_count, static_cast<size_t>(0));
+  Atomic::store(&_input_count, static_cast<size_t>(0));
   _samples_budget = samples_budget;
+  _params = params;
   _start_ticks = params.duration == -1 ? 0 : now(),
   _end_ticks = params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(params.duration);
 }
@@ -119,17 +120,17 @@ inline double compute_interval_alpha(size_t interval) {
 }
 
 AdaptiveSampler::AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt) :
-  _window_0(NULL),
-  _window_1(NULL),
-  _active_window(NULL),
-  _window_lookback_alpha(compute_interval_alpha(window_lookback_cnt)),
-  _budget_lookback_alpha(compute_interval_alpha(budget_lookback_cnt)),
-  _samples_budget(-1 * (1 + budget_lookback_cnt)),
-  _probability(1),
-  _budget_lookback_cnt(budget_lookback_cnt),
-  _avg_samples(std::numeric_limits<double>::quiet_NaN()),
-  _avg_count(0),
-  _lock(0) {}
+    _window_0(NULL),
+    _window_1(NULL),
+    _active_window(NULL),
+    _window_lookback_alpha(compute_interval_alpha(window_lookback_cnt)),
+    _budget_lookback_alpha(compute_interval_alpha(budget_lookback_cnt)),
+    _samples_budget(-1 * (1 + budget_lookback_cnt)),
+    _probability(1),
+    _avg_output(std::numeric_limits<double>::quiet_NaN()),
+    _budget_lookback_cnt(budget_lookback_cnt),
+    _avg_input(0),
+    _lock(0) {}
 
 bool AdaptiveSampler::initialize() {
   assert(_window_0 == NULL, "invariant");
@@ -180,7 +181,7 @@ bool AdaptiveSampler::Window::should_sample(int64_t timestamp, bool* expired_win
 
 bool AdaptiveSampler::Window::enter() {
   // Increment number of attempts
-  Atomic::add(&_running_count, static_cast<size_t>(1), memory_order_acq_rel);
+  Atomic::add(&_input_count, static_cast<size_t>(1), memory_order_acq_rel);
   return random_trial();
 }
 
@@ -189,9 +190,9 @@ bool AdaptiveSampler::Window::enter() {
  * value set by the adaptive sampler from what it has learned from the past.
  * The actual sampling rate for the window is modelled using a random process, where an
  * independent Bernoulli trial is performed for each attempt.
- * A trial assigns a single uniformly distributed random number in the interval (0,1) to the continuous
- * random variable X. The probability value assigned to the window becomes the p value of this trial,
- * i.e. the probability of success.
+ * A trial picks a single uniformly distributed random number in the interval (0,1)
+ * for the continuous random variable X. The probability value set for the window
+ * is the p value, i.e. the probability of success, for the trial.
  *
  *  If X < p, the outcome is successful and a sample is taken (if budget permits).
  */
@@ -202,6 +203,7 @@ inline double next_random_uniform() {
 
 bool AdaptiveSampler::Window::random_trial() {
   const double p = probability();
+  assert(p >= 0, "invariant");
   if (p < 1) {
     const double X = next_random_uniform();
     if (X >= p) {
@@ -209,74 +211,85 @@ bool AdaptiveSampler::Window::random_trial() {
       return false;
     }
   }
-  // Event occurred. Select for sampling if still within budget.
-  return Atomic::add(&_sample_count, static_cast<size_t>(1), memory_order_acq_rel) <= _samples_budget;
+  // Event occurred. If still within budget, the attempt is selected for sampling.
+  return Atomic::add(&_output_count, static_cast<size_t>(1), memory_order_acq_rel) <= _samples_budget;
 }
 
 // Called when a window was determined to have expired
 // and only exlusively by the holder of the try_lock
 void AdaptiveSampler::rotate_window() {
   assert(_lock, "invariant");
-  Window* const prev_window = active_window();
-  if (!prev_window->is_expired()) {
+  Window* const current_window = active_window();
+  if (!current_window->is_expired()) {
     // someone took care of it
     return;
   }
   const SamplerWindowParams new_params = new_window_params();
-  recalculate_averages(prev_window, new_params);
+  recalculate_averages(current_window, new_params);
   recalculate_probability(new_params);
-  install_new_window(prev_window, new_params);
-  assert(prev_window->is_expired(), "invariant");
+  install_new_window(current_window, new_params);
 }
 
-void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* prev_window, SamplerWindowParams new_params) {
-  assert(prev_window != NULL, "invariant");
-  assert(prev_window == active_window(), "invariant");
-  const SamplerWindowParams previous_params = prev_window->params();
-  const bool is_dummy = previous_params.duration == -1;
-  const double adjustment_factor = is_dummy ? prev_window->adjustment_factor(new_params.duration) : prev_window->adjustment_factor();
-  const double samples = prev_window->sample_count() * adjustment_factor;
-  const double total_count = prev_window->total_count() * adjustment_factor;
+/*
+* EWMA:
+* 
+* Y is a datapoint (at time t)
+* S is the current EMWA value (at time t-1)
+* alpha represents the degree of weighting decrease, a constant smoothing factor between 0 and 1.
+* A higher alpha discounts older observations faster.
+*
+* returns a new EMWA value for S
+*/
+
+inline double exponentially_weighted_moving_average(double Y, double alpha, double S) {
+  return std::isnan(S) ? Y : alpha * Y + (1 - alpha) * S;
+}
+
+inline double derivative_exponentially_weighted_moving_average(double Y, double alpha, double S) {
+  return std::isnan(S) ? Y : S + alpha * (Y - S);
+}
+
+void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params) {
+  assert(current_window != NULL, "invariant");
+  assert(current_window == active_window(), "invariant");
+  const SamplerWindowParams current_params = current_window->params();
+  const bool is_dummy = current_params.duration == -1;
+  const double adjustment_factor = is_dummy ? current_window->adjustment_factor(new_params.duration) : current_window->adjustment_factor();
+  const double output = current_window->output_count() * adjustment_factor;
+  const double input = current_window->input_count() * adjustment_factor;
 
   if (!is_dummy) {
-    _avg_samples = std::isnan(_avg_samples) ? samples : _avg_samples + _budget_lookback_alpha * (samples - _avg_samples);
+    _avg_output = derivative_exponentially_weighted_moving_average(output, _budget_lookback_alpha, _avg_output);
   }
-  _samples_budget = fmax<double>(new_params.sample_count - _avg_samples, 0) * _budget_lookback_cnt;
-
+  _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
   // fprintf(stdout, "=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_samples, samples, adjustment_factor);
-
-  if (_avg_count == 0) {
-    _avg_count = total_count;
-  } else {
-    // need to convert int '*_count' variables to double to prevent bit overflow
-    _avg_count = _avg_count + _window_lookback_alpha * (static_cast<double>(total_count) - static_cast<double>(_avg_count));
-  }
+  _avg_input = _avg_input == 0 ? input : derivative_exponentially_weighted_moving_average(input, _window_lookback_alpha, static_cast<double>(_avg_input));
 }
 
 void AdaptiveSampler::recalculate_probability(SamplerWindowParams params) {
-  if (_avg_count == 0) {
+  if (_avg_input == 0) {
     _probability = 1;
     return;
   }
-  const double p = (params.sample_count + _samples_budget) / (double)_avg_count;
+  const double p = (params.sample_count + _samples_budget) / static_cast<double>(_avg_input);
   _probability = p < 1 ? p : 1;
 }
 
-inline AdaptiveSampler::Window* AdaptiveSampler::idle_window(const AdaptiveSampler::Window* prev_window) const {
-  assert(prev_window != NULL, "invariant");
-  return prev_window == _window_0 ? _window_1 : _window_0;
+inline AdaptiveSampler::Window* AdaptiveSampler::next_window(const AdaptiveSampler::Window* current_window) const {
+  assert(current_window != NULL, "invariant");
+  return current_window == _window_0 ? _window_1 : _window_0;
 }
 
-void AdaptiveSampler::install_new_window(const AdaptiveSampler::Window* prev_window, SamplerWindowParams new_params) {
-  assert(prev_window != NULL, "invariant");
-  assert(prev_window == active_window(), "invariant");
-  Window* const next_window = idle_window(prev_window);
-  assert(next_window != prev_window, "invariant");
-  next_window->reinitialize(_probability, _samples_budget, new_params);
-  Atomic::release_store(&_active_window, next_window);
+void AdaptiveSampler::install_new_window(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params) {
+  assert(current_window != NULL, "invariant");
+  assert(current_window == active_window(), "invariant");
+  Window* const next = next_window(current_window);
+  assert(next != current_window, "invariant");
+  next->reinitialize(_probability, _samples_budget, new_params);
+  Atomic::release_store(&_active_window, next);
 }
 
-FixedRateSampler::FixedRateSampler(jlong window_duration, jlong samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt) :
+FixedRateSampler::FixedRateSampler(int64_t window_duration, int64_t samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt) :
     AdaptiveSampler(window_lookback_cnt, budget_lookback_cnt) {
   _params.sample_count = samples_per_window;
   _params.duration = window_duration;
