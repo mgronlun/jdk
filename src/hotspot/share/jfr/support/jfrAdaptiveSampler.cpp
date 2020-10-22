@@ -238,7 +238,7 @@ void AdaptiveSampler::rotate_window() {
 * alpha represents the degree of weighting decrease, a constant smoothing factor between 0 and 1.
 * A higher alpha discounts older observations faster.
 *
-* returns a new EMWA value for S
+* returns a new EWMA value for S
 */
 
 inline double exponentially_weighted_moving_average(double Y, double alpha, double S) {
