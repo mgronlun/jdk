@@ -81,11 +81,7 @@ class FixedRateSampler : public AdaptiveSampler {
  private:
   SamplerWindowParams _params;
  public:
-  FixedRateSampler(jlong window_duration, jlong samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt) : AdaptiveSampler(window_lookback_cnt, budget_lookback_cnt) {
-    _params.sample_count = samples_per_window;
-    _params.duration = window_duration;
-  }
-
+  FixedRateSampler(jlong window_duration, jlong samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt);
   SamplerWindowParams new_window_params() {
     return _params;
   }

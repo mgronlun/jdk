@@ -97,10 +97,10 @@ class AdaptiveSampler::Window : public JfrCHeapObj {
 };
 
 AdaptiveSampler::Window::Window(double probability, size_t samples_budget) :
-    _probability(probability),
-    _samples_budget(samples_budget),
     _start_ticks(_params.duration == -1 ? 0 : now()),
     _end_ticks(_params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(_params.duration)),
+    _probability(probability),
+    _samples_budget(samples_budget),
     _running_count(0),
     _sample_count(0) {}
 
@@ -274,5 +274,11 @@ void AdaptiveSampler::install_new_window(const AdaptiveSampler::Window* prev_win
   assert(next_window != prev_window, "invariant");
   next_window->reinitialize(_probability, _samples_budget, new_params);
   Atomic::release_store(&_active_window, next_window);
+}
+
+FixedRateSampler::FixedRateSampler(jlong window_duration, jlong samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt) :
+    AdaptiveSampler(window_lookback_cnt, budget_lookback_cnt) {
+  _params.sample_count = samples_per_window;
+  _params.duration = window_duration;
 }
 
