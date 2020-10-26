@@ -63,7 +63,7 @@ class AdaptiveSampler : public JfrCHeapObj {
 
   Window* active_window() const;
   Window* next_window(const Window* current_window) const;
-  void install_new_window(const Window* current_window, SamplerWindowParams next_window_params);
+  void install_next_window(const Window* current_window, SamplerWindowParams next_window_params);
   void rotate_window();
 
   void recalculate_averages(const Window* current_window, SamplerWindowParams params, EventRetiredSampleWindow& event);
