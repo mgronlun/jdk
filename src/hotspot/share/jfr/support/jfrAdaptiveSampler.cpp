@@ -140,7 +140,7 @@ bool Window::enter() {
  * for the continuous random variable X. The probability value set for the window
  * is the p value, i.e. the probability of success, for the trial.
  *
- *  If X < p, the outcome is successful and a sample is taken (if budget permits).
+ *  If X <= p, the outcome is successful and a sample is taken (if budget permits).
  */
 
 inline double next_random_uniform() {
@@ -150,9 +150,10 @@ inline double next_random_uniform() {
 bool Window::random_trial() {
   const double p = probability();
   assert(p >= 0, "invariant");
+  assert(p <= 1, "invariant");
   if (p < 1) {
     const double X = next_random_uniform();
-    if (X >= p) {
+    if (X > p) {
       // Event did not occur. Not selected for sampling.
       return false;
     }
@@ -174,7 +175,7 @@ void AdaptiveSampler::rotate_window() {
   EventRetiredSampleWindow event;
   recalculate_averages(current_window, new_params, event);
   recalculate_probability(new_params, event);
-  install_new_window(current_window, new_params);
+  install_next_window(current_window, new_params);
   event.commit();
 }
 
@@ -287,10 +288,10 @@ else {
 void AdaptiveSampler::recalculate_probability(SamplerWindowParams params, EventRetiredSampleWindow& event) {
   if (_avg_input == 0) {
     _probability = 1;
-    return;
+  } else {
+    const double p = (params.sample_count + _samples_budget) / static_cast<double>(_avg_input);
+    _probability = p < 1 ? p : 1;
   }
-  const double p = (params.sample_count + _samples_budget) / static_cast<double>(_avg_input);
-  _probability = p < 1 ? p : 1;
   event.set_new_probability(_probability);
   event.set_new_budget(_samples_budget);
 }
@@ -300,7 +301,7 @@ inline Window* AdaptiveSampler::next_window(const Window* current_window) const 
   return current_window == _window_0 ? _window_1 : _window_0;
 }
 
-void AdaptiveSampler::install_new_window(const Window* current_window, SamplerWindowParams new_params) {
+void AdaptiveSampler::install_next_window(const Window* current_window, SamplerWindowParams new_params) {
   assert(current_window != NULL, "invariant");
   assert(current_window == active_window(), "invariant");
   Window* const next = next_window(current_window);
