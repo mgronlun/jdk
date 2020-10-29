@@ -35,85 +35,22 @@
 #include "utilities/globalDefinitions.hpp"
 #include <cmath>
 
-inline int64_t now() {
-  return JfrTicks::now().value();
-}
-
-inline int64_t millis_to_countertime(int64_t millis) {
-  return JfrTimeConverter::nanos_to_countertime(millis * 1000000);
-}
-
-class AdaptiveSampler::Window : public JfrCHeapObj {
-  friend class AdaptiveSampler;
- private:
-  SamplerWindowParams _params = { -1, -1 };
-  int64_t _start_ticks;
-  int64_t _end_ticks;
-  double _probability;
-  size_t _samples_budget;
-  volatile size_t _output_count;
-  volatile size_t _input_count;
-
-  Window(double probablity, size_t samples_budget);
-  void reinitialize(double probability, size_t samples_budget, SamplerWindowParams params);
-
-  bool should_sample(int64_t timestamp, bool* is_expired);
-  bool enter();
-  bool random_trial();
-
-  size_t output_count() const {
-    const size_t count = Atomic::load(&_output_count);
-    return count < _samples_budget ? count : _samples_budget;
-  }
-
-  size_t input_count() const {
-    return Atomic::load(&_input_count);
-  }
-
-  const SamplerWindowParams params() const {
-    return _params;
-  }
-
-  double probability() const {
-    return Atomic::load_acquire(&_probability);
-  }
-
-  /**
-   * Ratio between the requested and the measured window duration
-   */
-   double adjustment_factor() const {
-    return static_cast<double>(_end_ticks - _start_ticks) / static_cast<double>(now() - _start_ticks);
-  }
-  
-  double adjustment_factor(int64_t window_duration_ms) const {
-    return static_cast<double>(millis_to_countertime(window_duration_ms)) / static_cast<double>(now() - _start_ticks);
-  }
-
-  bool is_expired() const {
-    return is_expired(now());
-  }
-
-  bool is_expired(int64_t timestamp) const {
-    return timestamp >= _end_ticks;
-  }
-};
-
-AdaptiveSampler::Window::Window(double probability, size_t samples_budget) :
-    _start_ticks(_params.duration == -1 ? 0 : now()),
-    _end_ticks(_params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(_params.duration)),
+Window::Window(double probability, size_t samples_budget) :
+    _start_ticks(_params.duration == -1 ? 0 : AdaptiveSampler::now()),
+    _end_ticks(_params.duration == -1 ? 0 : _start_ticks + AdaptiveSampler::millis_to_countertime(_params.duration)),
     _probability(probability),
     _samples_budget(samples_budget),
     _output_count(0),
     _input_count(0) {}
 
-void AdaptiveSampler::Window::reinitialize(double probability, size_t samples_budget, SamplerWindowParams params) {
+void Window::reinitialize(double probability, size_t samples_budget, SamplerWindowParams params) {
   _probability = probability;
   Atomic::store(&_output_count, static_cast<size_t>(0));
   Atomic::store(&_input_count, static_cast<size_t>(0));
   _samples_budget = samples_budget;
   _params = params;
-  _start_ticks = params.duration == -1 ? 0 : now(),
-  _end_ticks = params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(params.duration);
+  _start_ticks = params.duration == -1 ? 0 : AdaptiveSampler::now(),
+  _end_ticks = params.duration == -1 ? 0 : _start_ticks + AdaptiveSampler::millis_to_countertime(params.duration);
 }
 
 inline double compute_interval_alpha(size_t interval) {
@@ -153,13 +90,21 @@ AdaptiveSampler::~AdaptiveSampler() {
   delete _window_1;
 }
 
-inline AdaptiveSampler::Window* AdaptiveSampler::active_window() const {
+inline int64_t AdaptiveSampler::now() {
+  return JfrTicks::now().value();
+}
+
+inline int64_t AdaptiveSampler::millis_to_countertime(int64_t millis) {
+  return JfrTimeConverter::nanos_to_countertime(millis * 1000000);
+}
+
+inline Window* AdaptiveSampler::active_window() const {
   return Atomic::load_acquire(&_active_window);
 }
 
 bool AdaptiveSampler::should_sample() {
   bool expired_window = false;
-  int64_t timestamp = now();
+  int64_t timestamp = AdaptiveSampler::now();
   bool sample = active_window()->should_sample(timestamp, &expired_window);
   if (expired_window) {
     {
@@ -168,19 +113,19 @@ bool AdaptiveSampler::should_sample() {
         rotate_window();
       }
     }
-    timestamp = now();
+    timestamp = AdaptiveSampler::now();
     sample = active_window()->should_sample(timestamp, &expired_window);
   }
   return sample;
 }
 
-bool AdaptiveSampler::Window::should_sample(int64_t timestamp, bool* expired_window) {
+bool Window::should_sample(int64_t timestamp, bool* expired_window) {
   assert(expired_window != NULL, "invariant");
   *expired_window = is_expired(timestamp);
   return *expired_window ? false : enter();
 }
 
-bool AdaptiveSampler::Window::enter() {
+bool Window::enter() {
   // Increment number of attempts
   Atomic::add(&_input_count, static_cast<size_t>(1), memory_order_acq_rel);
   return random_trial();
@@ -202,7 +147,7 @@ inline double next_random_uniform() {
   return Thread::current()->jfr_thread_local()->sampler_support()->next_random_uniform();
 }
 
-bool AdaptiveSampler::Window::random_trial() {
+bool Window::random_trial() {
   const double p = probability();
   assert(p >= 0, "invariant");
   if (p < 1) {
@@ -252,7 +197,7 @@ inline double derivative_exponentially_weighted_moving_average(double Y, double 
   return std::isnan(S) ? Y : S + alpha * (Y - S);
 }
 
-void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params, EventRetiredSampleWindow& event) {
+void AdaptiveSampler::recalculate_averages(const Window* current_window, SamplerWindowParams new_params, EventRetiredSampleWindow& event) {
   assert(current_window != NULL, "invariant");
   assert(current_window == active_window(), "invariant");
   const SamplerWindowParams current_params = current_window->params();
@@ -350,12 +295,12 @@ void AdaptiveSampler::recalculate_probability(SamplerWindowParams params, EventR
   event.set_new_budget(_samples_budget);
 }
 
-inline AdaptiveSampler::Window* AdaptiveSampler::next_window(const AdaptiveSampler::Window* current_window) const {
+inline Window* AdaptiveSampler::next_window(const Window* current_window) const {
   assert(current_window != NULL, "invariant");
   return current_window == _window_0 ? _window_1 : _window_0;
 }
 
-void AdaptiveSampler::install_new_window(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params) {
+void AdaptiveSampler::install_new_window(const Window* current_window, SamplerWindowParams new_params) {
   assert(current_window != NULL, "invariant");
   assert(current_window == active_window(), "invariant");
   Window* const next = next_window(current_window);

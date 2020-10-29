@@ -1,5 +1,5 @@
 #include "precompiled.hpp"
-/*
+
 // This test performs mocking of certain JVM functionality. This works by
 // including the source file under test inside an anonymous namespace (which
 // prevents linking conflicts) with the mocked symbols redefined.
@@ -10,40 +10,56 @@
 #include <cmath>
 #include <random>
 
-#include "jfr/utilities/jfrTime.hpp"
+#include "jfr/jfrEvents.hpp"
 #include "jfr/utilities/jfrTimeConverter.hpp"
+#include "jfr/utilities/jfrTryLock.hpp"
+#include "logging/log.hpp"
 #include "runtime/atomic.hpp"
-#include "runtime/mutex.hpp"
-#include "runtime/mutexLocker.hpp"
-#include "runtime/os.hpp"
-#include "runtime/samplerSupport.hpp"
+#include "runtime/interfaceSupport.inline.hpp"
+#include "runtime/thread.inline.hpp"
 #include "utilities/globalDefinitions.hpp"
+#include <cmath>
 
 #include "unittest.hpp"
 
 // #undef SHARE_JFR_SUPPORT_JFRADAPTIVESAMPLER_HPP
 
 namespace {
-  class MockJfrTime : public ::JfrTime {
+  class MockEvent {
    public:
-    static jlong tick;
-    static bool is_ft_enabled() {
-      return false;
+    void set_requested_ratio(float new_value) {
     }
-    static bool is_ft_supported() {
-      return false;
+    void set_samples_raw(u8 new_value) {
     }
-    static void initialize() {}
-    static jlong frequency() {
-      return 1000000000;
+    void set_attempts_raw(u8 new_value) {
     }
-    static const void* time_function() {
-      return (const void*)MockJfrTime::current_tick;
+    void set_raw_ratio(float new_value) {
     }
-
-    static jlong current_tick() {
-      return tick;
+    void set_samples(float new_value) {
     }
+    void set_attempts(float new_value) {
+    }
+    void set_adjustment_factor(float new_value) {
+    }
+    void set_adjusted_ratio(float new_value) {
+    }
+    void set_prev_probability(float new_value) {
+    }
+    void set_new_probability(float new_value) {
+    }
+    void set_prev_budget(u8 new_value) {
+    }
+    void set_new_budget(u8 new_value) {
+    }
+    void set_prev_avgSamples(float new_value) {
+    }
+    void set_new_avgSamples(float new_value) {
+    }
+    void set_prev_avgAttempts(float new_value) {
+    }
+    void set_new_avgAttempts(float new_value) {
+    }
+    void commit() {}
   };
 
   class MockJfrTimeConverter : public ::JfrTimeConverter {
@@ -62,7 +78,24 @@ namespace {
     }
   };
 
-  jlong MockJfrTime::tick = 0;
+  class MockTickValue {
+   private:
+    jlong _ticks;
+   public:
+    MockTickValue(jlong ticks) : _ticks(ticks) {};
+    jlong value() {
+      return _ticks;
+    }
+  };
+  class MockTicks {
+   public:
+    static jlong tick;
+    static MockTickValue now() {
+      return MockTickValue(tick);
+    }
+  };
+
+  jlong MockTicks::tick = 0;
 
 // Reincluding source files in the anonymous namespace unfortunately seems to
 // behave strangely with precompiled headers (only when using gcc though)
@@ -70,14 +103,16 @@ namespace {
 #define DONT_USE_PRECOMPILED_HEADER
 #endif
 
-#define JfrTime MockJfrTime
+#define EventRetiredSampleWindow MockEvent
+#define JfrTicks MockTicks
 #define JfrTimeConverter MockJfrTimeConverter
 
 #include "jfr/support/jfrAdaptiveSampler.hpp"
 #include "jfr/support/jfrAdaptiveSampler.cpp"
 
 #undef JfrTimeConverter
-#undef JfrTime
+#undef JfrTicks
+#undef EventRetiredSampleWindow
 } // anonymous namespace
 
 class AdaptiveSampling : public ::testing::Test {
@@ -92,7 +127,7 @@ protected:
 
   void SetUp() {
     // Ensure that tests are separated in time by spreading them by 24hrs apart
-    MockJfrTime::tick += (24 * 60 * 60) * NANOSECS_PER_SEC;
+    MockTicks::tick += (24 * 60 * 60) * NANOSECS_PER_SEC;
   }
 
   void TearDown() {
@@ -139,7 +174,8 @@ TEST_VM_F(AdaptiveSampling, uniform_rate) {
   fprintf(stdout, "=== uniform\n");
   jlong events[100] = {0};
   jlong hits[100] = {0};
-  ::AdaptiveSampler* sampler = new ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  ::FixedRateSampler sampler = ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  EXPECT_TRUE(sampler.initialize());
 
   size_t all_events = 0;
   size_t all_hits = 0;
@@ -150,15 +186,14 @@ TEST_VM_F(AdaptiveSampling, uniform_rate) {
       all_events++;
       int hit_index = os::random() % 100;
       events[hit_index] = events[hit_index] + 1;
-      if (sampler->should_sample()) {
+      if (sampler.should_sample()) {
         counter++;
         hits[hit_index] = hits[hit_index] + 1;
       }
     }
     all_hits += counter;
-    MockJfrTime::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
+    MockTicks::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
   }
-  delete sampler;
   EXPECT_NEAR(expected_hits, all_hits, expected_hits * 0.25) << "Adaptive sampler: random uniform, all samples";
 
   assertDistributionProperties(100, events, hits, all_events, all_hits, "Adaptive sampler: random uniform, hit distribution");
@@ -168,8 +203,9 @@ TEST_VM_F(AdaptiveSampling, bursty_rate_10p) {
   fprintf(stdout, "=== bursty 10\n");
   jlong events[100] = {0};
   jlong hits[100] = {0};
-  ::AdaptiveSampler* sampler = new ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
-
+  ::FixedRateSampler sampler = ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  EXPECT_TRUE(sampler.initialize());
+  
   size_t all_events = 0;
   size_t all_hits = 0;
   for (int t = 0; t < window_count; t++) {
@@ -180,15 +216,14 @@ TEST_VM_F(AdaptiveSampling, bursty_rate_10p) {
       all_events++;
       int hit_index = os::random() % 100;
       events[hit_index] = events[hit_index] + 1;
-      if (sampler->should_sample()) {
+      if (sampler.should_sample()) {
         counter++;
         hits[hit_index] = hits[hit_index] + 1;
       }
     }
     all_hits += counter;
-    MockJfrTime::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
+    MockTicks::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
   }
-  delete sampler;
   EXPECT_NEAR(expected_hits, all_hits, expected_hits * 0.25) << "Adaptive sampler: bursty 10%";
 
   assertDistributionProperties(100, events, hits, all_events, all_hits, "Adaptive sampler: bursty 10%, hit distribution");
@@ -198,7 +233,8 @@ TEST_VM_F(AdaptiveSampling, bursty_rate_90p) {
   fprintf(stdout, "=== bursty 90\n");
   jlong events[100] = {0};
   jlong hits[100] = {0};
-  ::AdaptiveSampler* sampler = new ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  ::FixedRateSampler sampler = ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  EXPECT_TRUE(sampler.initialize());
 
   size_t all_events = 0;
   size_t all_hits = 0;
@@ -210,15 +246,14 @@ TEST_VM_F(AdaptiveSampling, bursty_rate_90p) {
       all_events++;
       int hit_index = os::random() % 100;
       events[hit_index] = events[hit_index] + 1;
-      if (sampler->should_sample()) {
+      if (sampler.should_sample()) {
         counter++;
         hits[hit_index] = hits[hit_index] + 1;
       }
     }
     all_hits += counter;
-    MockJfrTime::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
+    MockTicks::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
   }
-  delete sampler;
   EXPECT_NEAR(expected_hits, all_hits, expected_hits * max_sample_bias) << "Adaptive sampler: bursty 90%";
 
   assertDistributionProperties(100, events, hits, all_events, all_hits, "Adaptive sampler: bursty 90%, hit distribution");
@@ -228,7 +263,8 @@ TEST_VM_F(AdaptiveSampling, low_rate) {
   fprintf(stdout, "=== low\n");
   jlong events[100] = {0};
   jlong hits[100] = {0};
-  ::AdaptiveSampler* sampler = new ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  ::FixedRateSampler sampler = ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  EXPECT_TRUE(sampler.initialize());
 
   size_t all_events = 0;
   size_t all_hits = 0;
@@ -238,15 +274,14 @@ TEST_VM_F(AdaptiveSampling, low_rate) {
       all_events++;
       int hit_index = os::random() % 100;
       events[hit_index] = events[hit_index] + 1;
-      if (sampler->should_sample()) {
+      if (sampler.should_sample()) {
         counter++;
         hits[hit_index] = hits[hit_index] + 1;
       }
     }
     all_hits += counter;
-    MockJfrTime::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
+    MockTicks::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
   }
-  delete sampler;
   size_t target_samples = min_events_per_window * window_count;
   EXPECT_NEAR(target_samples, all_hits, expected_hits * 0.01) << "Adaptive sampler: below target";
 
@@ -257,7 +292,8 @@ TEST_VM_F(AdaptiveSampling, high_rate) {
   fprintf(stdout, "=== high\n");
   jlong events[100] = {0};
   jlong hits[100] = {0};
-  ::AdaptiveSampler* sampler = new ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  ::FixedRateSampler sampler = ::FixedRateSampler(window_duration_ms, expected_hits_per_window, 60, 160);
+  EXPECT_TRUE(sampler.initialize());
 
   size_t all_events = 0;
   size_t all_hits = 0;
@@ -267,18 +303,15 @@ TEST_VM_F(AdaptiveSampling, high_rate) {
       all_events++;
       int hit_index = os::random() % 100;
       events[hit_index] = events[hit_index] + 1;
-      if (sampler->should_sample()) {
+      if (sampler.should_sample()) {
         counter++;
         hits[hit_index] = hits[hit_index] + 1;
       }
     }
     all_hits += counter;
-    MockJfrTime::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
+    MockTicks::tick += window_duration_ms * NANOSECS_PER_MILLISEC + 1;
   }
-  delete sampler;
   EXPECT_NEAR(expected_hits, all_hits, expected_hits * 0.05) << "Adaptive sampler: above target";
 
   assertDistributionProperties(100, events, hits, all_events, all_hits, "Adaptive sampler: above target, hit distribution");
 }
-
-*/
