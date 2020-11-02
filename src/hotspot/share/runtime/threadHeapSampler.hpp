@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2019, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2018, Google and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -26,17 +26,18 @@
 #ifndef SHARE_RUNTIME_THREADHEAPSAMPLER_HPP
 #define SHARE_RUNTIME_THREADHEAPSAMPLER_HPP
 
-#include "gc/shared/allocTracer.hpp"
 #include "memory/allocation.hpp"
 #include "runtime/samplerSupport.hpp"
 
 class ThreadHeapSampler {
  private:
+  size_t _bytes_until_sample;
+  SamplerSupport _sampler_support;
   static volatile int _sampling_interval;
 
-  SamplerSupport _sampler_support;
 
-  size_t _bytes_until_sample;
+
+
 
   void pick_next_sample(size_t overflowed_bytes = 0);
 

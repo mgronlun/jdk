@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2018, Google and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -24,9 +24,8 @@
  */
 
 #include "precompiled.hpp"
+#include "prims/jvmtiExport.hpp"
 #include "runtime/atomic.hpp"
-#include "runtime/handles.inline.hpp"
-#include "runtime/sharedRuntime.hpp"
 #include "runtime/threadHeapSampler.hpp"
 
 // Default is 512kb.
@@ -35,7 +34,7 @@ volatile int ThreadHeapSampler::_sampling_interval = 512 * 1024;
 void ThreadHeapSampler::pick_next_sample(size_t overflowed_bytes) {
   // Explicitly test if the sampling interval is 0, return 0 to sample every
   // allocation.
-  int interval = get_sampling_interval();
+  const int interval = get_sampling_interval();
   if (interval == 0) {
     _bytes_until_sample = 0;
     return;
@@ -50,7 +49,10 @@ void ThreadHeapSampler::check_for_sampling(oop obj, size_t allocation_size, size
   // If not yet time for a sample, skip it.
   if (total_allocated_bytes < _bytes_until_sample) {
     _bytes_until_sample -= total_allocated_bytes;
+    return;
   }
+
+  JvmtiExport::sampled_object_alloc_event_collector(obj);
 
   size_t overflow_bytes = total_allocated_bytes - _bytes_until_sample;
   pick_next_sample(overflow_bytes);
