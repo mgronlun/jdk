@@ -26,6 +26,7 @@
 #define SHARE_JFR_RECORDER_SERVICE_JFREVENT_HPP
 
 #include "jfr/recorder/jfrEventSetting.inline.hpp"
+#include "jfr/recorder/service/jfrEventThrottler.hpp"
 #include "jfr/recorder/stacktrace/jfrStackTraceRepository.hpp"
 #include "jfr/utilities/jfrTime.hpp"
 #include "jfr/utilities/jfrTypes.hpp"
@@ -57,31 +58,23 @@ class JfrEventVerifier {
 };
 #endif // ASSERT
 
-// TODO: Got weird linker errors when trying to invoke JfrEventSampler::for_event() directly from this header file - so had to use this split access pattern
-class JfrEventSamplerAccess : public AllStatic {
-  public:
-  static bool is_sampled(JfrEventId event_id);
-};
-
 template <typename T>
 class JfrEvent {
  private:
   jlong _start_time;
   jlong _end_time;
   bool _started;
+  bool _untimed;
 
  protected:
-  JfrEvent(EventStartTime timing=TIMED) : _start_time(0), _end_time(0), _started(false)
+  JfrEvent(EventStartTime timing=TIMED) : _start_time(0), _end_time(0),
+                                          _started(false), _untimed(timing == UNTIMED)
 #ifdef ASSERT
   , _verifier()
 #endif
   {
     if (T::is_enabled()) {
-      if (T::hasRateLimit) {
-        _started = JfrEventSamplerAccess::is_sampled(T::eventId);
-      } else {
-        _started = true;
-      }
+      _started = true;
       if (TIMED == timing && !T::isInstant) {
         set_starttime(JfrTicks::now());
       }
@@ -164,9 +157,12 @@ class JfrEvent {
  private:
   bool should_write() {
     if (T::isInstant || T::isRequestable || T::hasCutoff) {
-      return true;
+      return T::hasRateLimit ? JfrEventThrottler::sample(T::eventId, _untimed ? 0 : _start_time) : true;
     }
-    return (_end_time - _start_time) >= JfrEventSetting::threshold(T::eventId);
+    if (_end_time - _start_time < JfrEventSetting::threshold(T::eventId)) {
+      return false;
+    }
+    return T::hasRateLimit ? JfrEventThrottler::sample(T::eventId, _untimed ? 0 : _end_time) : true;
   }
 
   void write_event() {

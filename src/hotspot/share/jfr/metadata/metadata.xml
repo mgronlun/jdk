@@ -1088,23 +1088,16 @@
     <Field type="ulong" contentType="bytes" name="size" label="Size Written" />
   </Event>
 
-  <Event name="RetiredSampleWindow" category="Flight Recorder" label="RetiredSampleWindow" thread="false" stackTrace="false" experimental="true">
-    <Field type="float" name="requested_ratio" label="Requested Ratio Samples vs " />
-    <Field type="ulong" name="samples_raw" label="Raw Samples" />
-    <Field type="ulong" name="attempts_raw" label="Raw Attempts" />
-    <Field type="float" name="raw_ratio" label="Raw Ratio Samples vs Attempts" />
-    <Field type="float" name="samples" label="Adjusted Samples" />
-    <Field type="float" name="attempts" label="Adjusted Attempts" />
-    <Field type="float" name="adjustment_factor" label="Adjustment Factor" />
-    <Field type="float" name="adjusted_ratio" label="Adjusted Ratio Samples vs Attempts" />
-    <Field type="float" name="prev_probability" label="Previous Probability" />
-    <Field type="float" name="new_probability" label="New Probability" />
-    <Field type="ulong" name="prev_budget" label="Previous Sample Budget" />
-    <Field type="ulong" name="new_budget" label="New Sample Budget" />
-    <Field type="float" name="prev_avgSamples" label="Previous Samples EWMA" />
-    <Field type="float" name="new_avgSamples" label="New Samples EWMA" />
-    <Field type="float" name="prev_avgAttempts" label="Previous Attempts EWMA" />
-    <Field type="float" name="new_avgAttempts" label="New Attempts EWMA" />
+  <Event name="SampleWindow" category="Flight Recorder" label="SampleWindow" thread="false" stackTrace="false" experimental="true">
+    <Field type="ulong" name="setPoint" label="Ideal Average" />
+    <Field type="ulong" name="sampleDuration" contentType="millis" label="Sample Duration" />
+    <Field type="long"  name="output" label="Output" />
+    <Field type="long"  name="outputRaw" label="Raw Output" />
+    <Field type="long"  name="input" label="Input" />
+    <Field type="float" name="ratio" label="Input To Output Ratio" />
+    <Field type="float" name="control" label="Ratio Control" />
+    <Field type="long"  name="errorTerm" label="Error Term" />
+    <Field type="long"  name="errors" label="Error Sum" />
   </Event>
 
   <Event name="HeapDump" category="Java Virtual Machine, Diagnostics" label="Heap Dump" stackTrace="true" thread="true">

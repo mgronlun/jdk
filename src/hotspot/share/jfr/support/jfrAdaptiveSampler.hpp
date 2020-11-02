@@ -36,55 +36,84 @@
  * it can fail for bursty ones when an extremely bursty window can influence the moving average in a way that several subsequent
  * windows will end up undersampled. As a measure of compensation the adaptive sampler employs the concept of 'sampling budget'
  * The 'sampling budget' is working as a 'spike damper', smoothing out the extremes in a way that the overall target rate
- * is obeyed without highly over- or under-sampled winows.
+ * is obeyed without highly over- or under-sampled windows.
  */
 
-struct SamplerWindowParams {
-  int64_t duration;
-  int64_t sample_count;
+struct JfrSamplerParams {
+  size_t samples_per_window;   // the average number of sample points per window
+  size_t window_duration_ms;   // period of time the sampler selects "samples_per_window" number of samples
+  size_t amortization_windows; // future projection / strategy to recover the cumulative deviation (specified in number of windows)
 };
 
-class EventRetiredSampleWindow;
-
-class AdaptiveSampler : public JfrCHeapObj {
+class JfrSamplerWindow : public JfrCHeapObj {
+  friend class JfrAdaptiveSampler;
  private:
-  class Window;
-  Window* _window_0;
-  Window* _window_1;
-  Window* _active_window;
-  const double _window_lookback_alpha;
-  const double _budget_lookback_alpha;
-  double _samples_budget;
-  double _probability;
-  double _avg_output;
-  const size_t _budget_lookback_cnt;
-  size_t _avg_input;
+  JfrSamplerParams _params = { 0, 0, 0 };
+  int64_t _start_ticks;
+  int64_t _end_ticks;
+  size_t _sampling_interval;
+  size_t _projected_population_size;
+  volatile size_t _measured_population_size;
+  double _normalization_factor;
+
+  size_t population_size_raw() const;
+  size_t sample_size_raw() const;
+  size_t sample_size(size_t population_size) const;
+  size_t max_sample_size() const;
+
+  JfrSamplerWindow();
+  void reinitialize(const JfrSamplerParams& params, size_t projected_population_size, size_t sampling_interval);
+  double duration(int64_t end_ticks) const;
+  bool is_expired(int64_t timestamp) const;
+  void normalize(int64_t timestamp);
+
+  bool sample(int64_t timestamp, bool* is_expired);
+  bool sample();
+
+ public:
+  const JfrSamplerParams& params() const;
+  size_t population_size() const;
+  size_t sample_size() const;
+  intptr_t debt() const;
+  intptr_t cumulative_debt() const;
+};
+
+class EventSampleWindow;
+class SamplerSupport;
+
+class JfrAdaptiveSampler : public JfrCHeapObj {
+ protected:
+  JfrSamplerWindow* _window_0;
+  JfrSamplerWindow* _window_1;
+  JfrSamplerWindow* _active_window;
+  SamplerSupport* _support;
   volatile int _lock;
 
-  Window* active_window() const;
-  Window* next_window(const Window* current_window) const;
-  void install_next_window(const Window* current_window, SamplerWindowParams next_window_params);
-  void rotate_window();
+  JfrAdaptiveSampler();
+  virtual ~JfrAdaptiveSampler();
+  virtual bool initialize();
 
-  void recalculate_averages(const Window* current_window, SamplerWindowParams params, EventRetiredSampleWindow& event);
-  void recalculate_probability(SamplerWindowParams params, EventRetiredSampleWindow& event);
+  void debug(const JfrSamplerWindow* expired) const;
+  void fill(EventSampleWindow& event, const JfrSamplerWindow* expired);
 
- protected:
-  AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt);
-  virtual ~AdaptiveSampler();
-  bool initialize();
+  JfrSamplerWindow* active_window() const;
+  JfrSamplerWindow* next_window(const JfrSamplerWindow* expired) const;
+  void rotate_window(int64_t timestamp);
+  void rotate(const JfrSamplerWindow* expired);
+  void rotate(const JfrSamplerParams& params, const JfrSamplerWindow* expired, size_t sampling_interval, size_t projected_population_size);
+
+  virtual JfrSamplerParams next_window_params(const JfrSamplerWindow* expired) = 0;
 
  public:
-  bool should_sample();
-  virtual SamplerWindowParams new_window_params() = 0;
+  virtual bool sample(int64_t timestamp = 0);
 };
 
-class FixedRateSampler : public AdaptiveSampler {
+class JfrFixedRateSampler : public JfrAdaptiveSampler {
  private:
-  SamplerWindowParams _params;
+  JfrSamplerParams _params;
  public:
-  FixedRateSampler(int64_t window_duration, int64_t samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt);
-  SamplerWindowParams new_window_params() {
+  JfrFixedRateSampler(size_t samples_per_window, size_t window_duration_ms);
+  JfrSamplerParams next_window_params(const JfrSamplerWindow* expired) {
     return _params;
   }
 };

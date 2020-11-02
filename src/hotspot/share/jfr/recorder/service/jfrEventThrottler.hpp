@@ -22,23 +22,27 @@
  *
  */
 
-#ifndef SHARE_JFR_SUPPORT_JFREVENTSAMPLER_HPP
-#define SHARE_JFR_SUPPORT_JFREVENTSAMPLER_HPP
+#ifndef SHARE_JFR_RECORDER_SERVICE_JFREVENTTHROTTLER_HPP
+#define SHARE_JFR_RECORDER_SERVICE_JFREVENTTHROTTLER_HPP
 
 #include "jfrfiles/jfrEventIds.hpp"
 #include "jfr/support/jfrAdaptiveSampler.hpp"
 
-class JfrEventSampler : public AdaptiveSampler {
+class JfrEventThrottler : public JfrAdaptiveSampler {
   friend class JfrRecorder;
  private:
   JfrEventId _event_id;
+  JfrSamplerParams _last_params;
+  int64_t _last_rate_limit_per_second;
   static bool create();
   static void destroy();
+  JfrSamplerParams next_window_params(const JfrSamplerWindow* expired);
  public:
-  JfrEventSampler(JfrEventId event_id);
+  JfrEventThrottler(JfrEventId event_id);
   bool initialize();
-  SamplerWindowParams new_window_params();
-  static JfrEventSampler* for_event(JfrEventId event_id);
+  bool sample(int64_t timestamp = 0);
+  static JfrEventThrottler* for_event(JfrEventId event_id);
+  static bool sample(JfrEventId event_id, int64_t timestamp);
 };
 
-#endif // SHARE_JFR_SUPPORT_JFREVENTSAMPLER_HPP
+#endif // SHARE_JFR_RECORDER_SERVICE_JFREVENTTHROTTLER_HPP

@@ -28,10 +28,8 @@
 #include "jfr/utilities/jfrTime.hpp"
 #include "jfr/utilities/jfrTimeConverter.hpp"
 #include "jfr/utilities/jfrTryLock.hpp"
-#include "logging/log.hpp"
 #include "runtime/atomic.hpp"
-#include "runtime/interfaceSupport.inline.hpp"
-#include "runtime/thread.inline.hpp"
+#include "runtime/samplerSupport.hpp"
 #include "utilities/globalDefinitions.hpp"
 #include <cmath>
 
@@ -39,335 +37,247 @@ inline int64_t now() {
   return JfrTicks::now().value();
 }
 
-inline int64_t millis_to_countertime(int64_t millis) {
-  return JfrTimeConverter::nanos_to_countertime(millis * 1000000);
+inline double millis_to_countertime(int64_t millis) {
+  return static_cast<double>(JfrTimeConverter::nanos_to_countertime(millis * 1000000));
 }
 
-class AdaptiveSampler::Window : public JfrCHeapObj {
-  friend class AdaptiveSampler;
- private:
-  SamplerWindowParams _params = { -1, -1 };
-  int64_t _start_ticks;
-  int64_t _end_ticks;
-  double _probability;
-  size_t _samples_budget;
-  volatile size_t _output_count;
-  volatile size_t _input_count;
+JfrSamplerWindow::JfrSamplerWindow() :
+  _start_ticks(0),
+  _end_ticks(0),
+  _normalization_factor(0),
+  _sampling_interval(1),
+  _projected_population_size(0),
+  _measured_population_size(0) {}
 
-  Window(double probablity, size_t samples_budget);
-  void reinitialize(double probability, size_t samples_budget, SamplerWindowParams params);
-
-  bool should_sample(int64_t timestamp, bool* is_expired);
-  bool enter();
-  bool random_trial();
-
-  size_t output_count() const {
-    const size_t count = Atomic::load(&_output_count);
-    return count < _samples_budget ? count : _samples_budget;
+void JfrSamplerWindow::reinitialize(const JfrSamplerParams& params, size_t projected_population_size, size_t sampling_interval) {
+  assert(sampling_interval >= 1, "invariant");
+  _projected_population_size = projected_population_size;
+  Atomic::store(&_measured_population_size, static_cast<size_t>(0));
+  if (projected_population_size == 0) {
+    // disabled
+    _end_ticks = 0;
+    return;
   }
-
-  size_t input_count() const {
-    return Atomic::load(&_input_count);
-  }
-
-  const SamplerWindowParams params() const {
-    return _params;
-  }
-
-  double probability() const {
-    return Atomic::load_acquire(&_probability);
-  }
-
-  /**
-   * Ratio between the requested and the measured window duration
-   */
-   double adjustment_factor() const {
-    return static_cast<double>(_end_ticks - _start_ticks) / static_cast<double>(now() - _start_ticks);
-  }
-  
-  double adjustment_factor(int64_t window_duration_ms) const {
-    return static_cast<double>(millis_to_countertime(window_duration_ms)) / static_cast<double>(now() - _start_ticks);
-  }
-
-  bool is_expired() const {
-    return is_expired(now());
-  }
-
-  bool is_expired(int64_t timestamp) const {
-    return timestamp >= _end_ticks;
-  }
-};
-
-AdaptiveSampler::Window::Window(double probability, size_t samples_budget) :
-    _start_ticks(_params.duration == -1 ? 0 : now()),
-    _end_ticks(_params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(_params.duration)),
-    _probability(probability),
-    _samples_budget(samples_budget),
-    _output_count(0),
-    _input_count(0) {}
-
-void AdaptiveSampler::Window::reinitialize(double probability, size_t samples_budget, SamplerWindowParams params) {
-  _probability = probability;
-  Atomic::store(&_output_count, static_cast<size_t>(0));
-  Atomic::store(&_input_count, static_cast<size_t>(0));
-  _samples_budget = samples_budget;
+  _sampling_interval = sampling_interval;
   _params = params;
-  _start_ticks = params.duration == -1 ? 0 : now(),
-  _end_ticks = params.duration == -1 ? 0 : _start_ticks + millis_to_countertime(params.duration);
+  _start_ticks = params.window_duration_ms == 0 ? 0 : now();
+  _end_ticks = params.window_duration_ms == 0 ? 0 : _start_ticks + millis_to_countertime(params.window_duration_ms);
 }
 
-inline double compute_interval_alpha(size_t interval) {
-  return 1 - std::pow(interval, static_cast<double>(-1) / static_cast<double>(interval));
+const JfrSamplerParams& JfrSamplerWindow::params() const {
+  return _params;
 }
 
-AdaptiveSampler::AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt) :
-    _window_0(NULL),
-    _window_1(NULL),
-    _active_window(NULL),
-    _window_lookback_alpha(compute_interval_alpha(window_lookback_cnt)),
-    _budget_lookback_alpha(compute_interval_alpha(budget_lookback_cnt)),
-    _samples_budget(-1 * (1 + budget_lookback_cnt)),
-    _probability(1),
-    _avg_output(std::numeric_limits<double>::quiet_NaN()),
-    _budget_lookback_cnt(budget_lookback_cnt),
-    _avg_input(0),
-    _lock(0) {}
+size_t JfrSamplerWindow::population_size_raw() const {
+  return Atomic::load(&_measured_population_size);
+}
 
-bool AdaptiveSampler::initialize() {
+size_t JfrSamplerWindow::population_size() const {
+  return floor(_normalization_factor * population_size_raw());
+}
+
+size_t JfrSamplerWindow::max_sample_size() const {
+  return _projected_population_size / _sampling_interval;
+}
+
+size_t JfrSamplerWindow::sample_size(size_t population_size) const {
+  if (population_size > _projected_population_size) {
+    return max_sample_size();
+  }
+  return population_size / _sampling_interval;
+}
+
+size_t JfrSamplerWindow::sample_size_raw() const {
+  return sample_size(population_size_raw());
+}
+
+size_t JfrSamplerWindow::sample_size() const {
+  return sample_size(population_size());
+}
+
+intptr_t JfrSamplerWindow::debt() const {
+  return static_cast<intptr_t>(sample_size() - _params.samples_per_window);
+}
+
+intptr_t JfrSamplerWindow::cumulative_debt() const {
+  return static_cast<intptr_t>((_params.samples_per_window) - max_sample_size()) + debt();
+}
+
+double JfrSamplerWindow::duration(int64_t end_ticks) const {
+  assert(end_ticks >= _start_ticks, "invariant");
+  return static_cast<double>(end_ticks - _start_ticks);
+}
+
+JfrAdaptiveSampler::JfrAdaptiveSampler() :
+  _window_0(NULL),
+  _window_1(NULL),
+  _active_window(NULL),
+  _support(NULL),
+  _lock(0) {}
+
+JfrAdaptiveSampler::~JfrAdaptiveSampler() {
+  delete _window_0;
+  delete _window_1;
+  delete _support;
+}
+
+bool JfrAdaptiveSampler::initialize() {
   assert(_window_0 == NULL, "invariant");
-  _window_0 = new Window(_probability, static_cast<size_t>(_samples_budget));
+  _window_0 = new JfrSamplerWindow();
   if (_window_0 == NULL) {
     return false;
   }
   assert(_window_1 == NULL, "invariant");
-  _window_1 = new Window(_probability, static_cast<size_t>(_samples_budget));
+  _window_1 = new JfrSamplerWindow();
   if (_window_1 == NULL) {
     return false;
   }
   _active_window = _window_0;
-  return true;
+  assert(_support == NULL, "invariant");
+  _support = new SamplerSupport(true);
+  return _support != NULL;
 }
 
-AdaptiveSampler::~AdaptiveSampler() {
-  delete _window_0;
-  delete _window_1;
-}
-
-inline AdaptiveSampler::Window* AdaptiveSampler::active_window() const {
+inline JfrSamplerWindow* JfrAdaptiveSampler::active_window() const {
   return Atomic::load_acquire(&_active_window);
 }
 
-bool AdaptiveSampler::should_sample() {
+bool JfrAdaptiveSampler::sample(int64_t timestamp) {
   bool expired_window = false;
-  int64_t timestamp = now();
-  bool sample = active_window()->should_sample(timestamp, &expired_window);
+  const bool result = active_window()->sample(timestamp, &expired_window);
   if (expired_window) {
     {
-      JfrTryLock rotation_lock(&_lock);
-      if (rotation_lock.acquired()) {
-        rotate_window();
+      JfrTryLock rotate_lock(&_lock);
+      if (rotate_lock.acquired()) {
+        rotate_window(timestamp);
       }
     }
-    timestamp = now();
-    sample = active_window()->should_sample(timestamp, &expired_window);
+    return active_window()->sample(now(), &expired_window);
   }
-  return sample;
+  return result;
 }
 
-bool AdaptiveSampler::Window::should_sample(int64_t timestamp, bool* expired_window) {
+bool JfrSamplerWindow::sample(int64_t timestamp, bool* expired_window) {
   assert(expired_window != NULL, "invariant");
-  *expired_window = is_expired(timestamp);
-  return *expired_window ? false : enter();
-}
-
-bool AdaptiveSampler::Window::enter() {
-  // Increment number of attempts
-  Atomic::add(&_input_count, static_cast<size_t>(1), memory_order_acq_rel);
-  return random_trial();
-}
-
-/*
- * A window is a fixed time duration together with a target sampling rate / probability
- * value set by the adaptive sampler from what it has learned from the past.
- * The actual sampling rate for the window is modelled using a random process, where an
- * independent Bernoulli trial is performed for each attempt.
- * A trial picks a single uniformly distributed random number in the interval (0,1)
- * for the continuous random variable X. The probability value set for the window
- * is the p value, i.e. the probability of success, for the trial.
- *
- *  If X <= p, the outcome is successful and a sample is taken (if budget permits).
- */
-
-inline double next_random_uniform() {
-  return Thread::current()->jfr_thread_local()->sampler_support()->next_random_uniform();
-}
-
-bool AdaptiveSampler::Window::random_trial() {
-  const double p = probability();
-  assert(p >= 0, "invariant");
-  assert(p <= 1, "invariant");
-  if (p < 1) {
-    const double X = next_random_uniform();
-    if (X > p) {
-      // Event did not occur. Not selected for sampling.
-      return false;
-    }
+  assert(*expired_window == false, "invariant");
+  if (is_expired(timestamp)) {
+    *expired_window = true;
+    return false;
   }
-  // Event occurred. If still within budget, the attempt is selected for sampling.
-  return Atomic::add(&_output_count, static_cast<size_t>(1), memory_order_acq_rel) <= _samples_budget;
+  return sample();
 }
 
-// Called when a window was determined to have expired
-// and only exlusively by the holder of the try_lock
-void AdaptiveSampler::rotate_window() {
+inline bool JfrSamplerWindow::is_expired(int64_t timestamp) const {
+  return timestamp == 0 ? now() >= _end_ticks : timestamp >= _end_ticks;
+}
+
+inline bool JfrSamplerWindow::sample() {
+  const size_t xchg = Atomic::add(&_measured_population_size, (size_t)1);
+  return xchg <= _projected_population_size && xchg % _sampling_interval == 0;
+}
+
+// Called exclusively by the holder of the try lock
+// when a window is determined to have expired.
+void JfrAdaptiveSampler::rotate_window(int64_t timestamp) {
   assert(_lock, "invariant");
-  Window* const current_window = active_window();
-  if (!current_window->is_expired()) {
-    // someone took care of it
+  EventSampleWindow event;
+  JfrSamplerWindow* const current = active_window();
+  if (!current->is_expired(timestamp)) {
+    // someone else took care of it
     return;
   }
-  const SamplerWindowParams new_params = new_window_params();
-  EventRetiredSampleWindow event;
-  recalculate_averages(current_window, new_params, event);
-  recalculate_probability(new_params, event);
-  install_next_window(current_window, new_params);
+  current->normalize(timestamp);
+  debug(current);
+  fill(event, current);
+  rotate(current);
   event.commit();
 }
 
-/*
-* EWMA:
-* 
-* Y is a datapoint (at time t)
-* S is the current EMWA value (at time t-1)
-* alpha represents the degree of weighting decrease, a constant smoothing factor between 0 and 1.
-* A higher alpha discounts older observations faster.
-*
-* returns a new EWMA value for S
-*/
-
-inline double exponentially_weighted_moving_average(double Y, double alpha, double S) {
-  return std::isnan(S) ? Y : alpha * Y + (1 - alpha) * S;
+inline void JfrSamplerWindow::normalize(int64_t timestamp) {
+  _normalization_factor = duration(_end_ticks) / duration(timestamp == 0 ? now() : timestamp);
 }
 
-inline double derivative_exponentially_weighted_moving_average(double Y, double alpha, double S) {
-  return std::isnan(S) ? Y : S + alpha * (Y - S);
-}
-
-void AdaptiveSampler::recalculate_averages(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params, EventRetiredSampleWindow& event) {
-  assert(current_window != NULL, "invariant");
-  assert(current_window == active_window(), "invariant");
-  const SamplerWindowParams current_params = current_window->params();
-  const bool is_dummy = current_params.duration == -1;
-  const double adjustment_factor = is_dummy ? current_window->adjustment_factor(new_params.duration) : current_window->adjustment_factor();
-  const double samples_raw = current_window->output_count();
-  const double samples = samples_raw * adjustment_factor;
-  const double total_count_raw = current_window->input_count();
-  const double total_count = total_count_raw * adjustment_factor;
-
-  const double requested_ratio = (double)current_params.sample_count / (double)current_params.duration;
-
-  event.set_requested_ratio(requested_ratio);
-  event.set_samples_raw(samples_raw);
-  event.set_attempts_raw(total_count_raw);
-  event.set_raw_ratio(samples_raw / total_count_raw);
-  event.set_samples(samples);
-  event.set_attempts(total_count);
-  event.set_adjustment_factor(adjustment_factor);
-  event.set_adjusted_ratio(samples / total_count);
-  event.set_prev_probability(current_window->probability());
-  event.set_prev_avgSamples(_avg_output);
-  event.set_prev_avgAttempts(_avg_input);
-  event.set_prev_budget(current_window->_samples_budget);
-
-  if (!is_dummy) {
-    _avg_output = exponentially_weighted_moving_average(samples, _budget_lookback_alpha, _avg_output);
+static intptr_t amortize_debt(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+  const intptr_t inverse_cumulative_debt = -expired->cumulative_debt(); // negation
+  if (params.amortization_windows <= 1) {
+    return inverse_cumulative_debt;
   }
-  _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
-  printf("=== avg samples: %f, samples: %f, prob: %f\n", _avg_output, samples, current_window->probability());
-  _avg_input = _avg_input == 0 ? total_count : exponentially_weighted_moving_average(total_count, _window_lookback_alpha, static_cast<double>(_avg_input));
+  return round(static_cast<double>(inverse_cumulative_debt) / static_cast<double>(params.amortization_windows));
+}
 
-  /*
+static size_t sample_size_for_next_window(const JfrSamplerParams& param, const JfrSamplerWindow* expired) {
+  const intptr_t sample_size = static_cast<intptr_t>(param.samples_per_window) + amortize_debt(param, expired);
+  return sample_size < 0 ? 0 : sample_size;
+}
 
-  if (!is_dummy) {
-    _avg_output = std::isnan(_avg_output) ? samples : _avg_output + _budget_lookback_alpha * (samples - _avg_output);
+static size_t sampling_interval_for_next_window(const JfrSamplerWindow* expired, SamplerSupport* support, size_t projected_sample_size) {
+  assert(expired != NULL, "invariant");
+  assert(support != NULL, "invariant");
+  if (projected_sample_size == 0) {
+    return 1;
   }
-  _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
-
-  printf("=== samples raw: %f, attempts_raw: %f, ratio: %f, prob: %f\n", samples_raw, total_count_raw, samples_raw / total_count_raw, current_window->probability());
-  printf("=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_output, samples, adjustment_factor);
-
-  if (_avg_input == 0) {
-    _avg_input = total_count;
-  } else {
-    // need to convert int '*_count' variables to double to prevent bit overflow
-    _avg_input = _avg_input + _window_lookback_alpha * ((double)total_count - (double)_avg_input);
+  const size_t previous_population_size = expired->population_size();
+  if (previous_population_size < projected_sample_size) {
+    return 1;
   }
-
-  */
-
-  event.set_new_avgSamples(_avg_output);
-  event.set_new_avgAttempts(_avg_input);
-
-  /*
-  const double samples = current_window->output_count() * adjustment_factor;
-  const double attempts = current_window->input_count() * adjustment_factor;
-  if (!is_dummy) {
-    _avg_output = derivative_exponentially_weighted_moving_average(samples, _budget_lookback_alpha, _avg_output);
-  }
-  _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
-  printf("=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_output, samples, adjustment_factor);
-  _avg_input = _avg_input == 0 ? attempts : derivative_exponentially_weighted_moving_average(attempts, _window_lookback_alpha, static_cast<double>(_avg_input));
-  */
+  const double projected_geometric_mean = static_cast<double>(previous_population_size) / static_cast<double>(projected_sample_size);
+  // The sampling interval is a geometric random variable with the specified mean.
+  const size_t sampling_interval = support->pick_next_geometric_sample(projected_geometric_mean);
+  assert(sampling_interval > 0, "invariant");
+  return sampling_interval;
 }
 
-/*
-double samples = current_window->output_count() * adjustment_factor;
-double total_count = current_window->input_count() * adjustment_factor;
-
-if (!is_dummy) {
-  _avg_output = std::isnan(_avg_output) ? samples : _avg_output + _budget_lookback_alpha * (samples - _avg_output);
-}
-_samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
-
-printf("=== avg samples: %f, samples: %f, adjustment: %f\n", _avg_output, samples, adjustment_factor);
-
-if (_avg_input == 0) {
-  _avg_input = total_count;
-}
-else {
-  // need to convert int '*_count' variables to double to prevent bit overflow
-  _avg_input = _avg_input + _window_lookback_alpha * ((double)total_count - (double)_avg_input);
-}
-*/
-
-void AdaptiveSampler::recalculate_probability(SamplerWindowParams params, EventRetiredSampleWindow& event) {
-  if (_avg_input == 0) {
-    _probability = 1;
-  } else {
-    const double p = (params.sample_count + _samples_budget) / static_cast<double>(_avg_input);
-    _probability = p < 1 ? p : 1;
-  }
-  event.set_new_probability(_probability);
-  event.set_new_budget(_samples_budget);
+void JfrAdaptiveSampler::rotate(const JfrSamplerWindow* expired) {
+  assert(expired != NULL, "invariant");
+  assert(expired == active_window(), "invariant");
+  JfrSamplerParams params = next_window_params(expired); // callback to client for next window parameters
+  const size_t projected_sample_size = sample_size_for_next_window(params, expired);
+  const size_t sampling_interval = sampling_interval_for_next_window(expired, _support, projected_sample_size);
+  assert(sampling_interval >= 1, "invariant");
+  const size_t projected_population_size = projected_sample_size * sampling_interval;
+  rotate(params, expired, projected_sample_size * sampling_interval, sampling_interval);
 }
 
-inline AdaptiveSampler::Window* AdaptiveSampler::next_window(const AdaptiveSampler::Window* current_window) const {
-  assert(current_window != NULL, "invariant");
-  return current_window == _window_0 ? _window_1 : _window_0;
-}
-
-void AdaptiveSampler::install_next_window(const AdaptiveSampler::Window* current_window, SamplerWindowParams new_params) {
-  assert(current_window != NULL, "invariant");
-  assert(current_window == active_window(), "invariant");
-  Window* const next = next_window(current_window);
-  assert(next != current_window, "invariant");
-  next->reinitialize(_probability, _samples_budget, new_params);
+void JfrAdaptiveSampler::rotate(const JfrSamplerParams& params, const JfrSamplerWindow* expired, size_t projected_population_size, size_t sampling_interval) {
+  assert(expired != NULL, "invariant");
+  assert(expired == active_window(), "invariant");
+  JfrSamplerWindow* const next = next_window(expired);
+  assert(next != expired, "invariant");
+  next->reinitialize(params, projected_population_size, sampling_interval);
   Atomic::release_store(&_active_window, next);
 }
 
-FixedRateSampler::FixedRateSampler(int64_t window_duration, int64_t samples_per_window, size_t window_lookback_cnt, size_t budget_lookback_cnt) :
-    AdaptiveSampler(window_lookback_cnt, budget_lookback_cnt) {
-  _params.sample_count = samples_per_window;
-  _params.duration = window_duration;
+inline JfrSamplerWindow* JfrAdaptiveSampler::next_window(const JfrSamplerWindow* expired) const {
+  assert(expired != NULL, "invariant");
+  return expired == _window_0 ? _window_1 : _window_0;
 }
 
+void JfrAdaptiveSampler::debug(const JfrSamplerWindow* expired) const {
+  assert(expired == active_window(), "invariant");
+  const JfrSamplerParams& params = expired->params();
+  if (params.window_duration_ms == 0) {
+    printf("Sampling started...\n");
+    return;
+  }
+  printf("=== sample size: %f, population size: %f, ratio: %f, limit: %f, deviation: %f, cum.deviation: %f\n",
+    (double)expired->sample_size(), (double)expired->population_size(),
+    expired->population_size() == 0 ? 0 : (double)expired->sample_size() / (double)expired->population_size(),
+    (double)expired->max_sample_size(),
+    (double)expired->debt(), (double)expired->cumulative_debt());
+}
+
+void JfrAdaptiveSampler::fill(EventSampleWindow& event, const JfrSamplerWindow* expired) {
+  assert(expired == active_window(), "invariant");
+  const JfrSamplerParams& params = expired->params();
+  event.set_setPoint(params.samples_per_window);
+  event.set_sampleDuration(params.window_duration_ms);
+  const size_t sample_size = expired->sample_size();
+  event.set_output(sample_size);
+  event.set_outputRaw(expired->sample_size_raw());
+  const size_t population_size = expired->population_size();
+  event.set_input(population_size);
+  event.set_ratio(population_size == 0 ? 0 : static_cast<double>(sample_size) / static_cast<double>(population_size));
+  event.set_control(0);
+  event.set_errorTerm(expired->debt());
+  event.set_errors(expired->cumulative_debt());
+}
