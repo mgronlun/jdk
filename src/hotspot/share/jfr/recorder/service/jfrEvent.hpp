@@ -157,12 +157,12 @@ class JfrEvent {
  private:
   bool should_write() {
     if (T::isInstant || T::isRequestable || T::hasCutoff) {
-      return T::hasRateLimit ? JfrEventThrottler::sample(T::eventId, _untimed ? 0 : _start_time) : true;
+      return T::hasRateLimit ? JfrEventThrottler::accept(T::eventId, _untimed ? 0 : _start_time) : true;
     }
     if (_end_time - _start_time < JfrEventSetting::threshold(T::eventId)) {
       return false;
     }
-    return T::hasRateLimit ? JfrEventThrottler::sample(T::eventId, _untimed ? 0 : _end_time) : true;
+    return T::hasRateLimit ? JfrEventThrottler::accept(T::eventId, _untimed ? 0 : _end_time) : true;
   }
 
   void write_event() {

@@ -27,22 +27,52 @@
 
 #include "jfr/utilities/jfrAllocation.hpp"
 
-/**
- * The adaptive sampler is guaranteeing a maximum number of samples picked per a certain time interval.
- * The maximum number is a soft limit which can be, in extreme situations be crossed but the overshoot
- * is usually staying within 15-20% of the requested limit (the actual number is affected by the 'sampling budget' size).
- * As for the implementation - the sampler is using fixed size time windows and adjusts the sampling rate/probability
- * for the next window based on what it learned in the past. While this strategy fares pretty well for a fairly stable system
- * it can fail for bursty ones when an extremely bursty window can influence the moving average in a way that several subsequent
- * windows will end up undersampled. As a measure of compensation the adaptive sampler employs the concept of 'sampling budget'
- * The 'sampling budget' is working as a 'spike damper', smoothing out the extremes in a way that the overall target rate
- * is obeyed without highly over- or under-sampled windows.
+/*
+ * The adaptive sampler terminology used is mostly from the domain of statistics:
+ *
+ * Population - a set of elements of interest.
+ * Sample - a subset of elements from a population selected by a defined procedure.
+ * Sample point - an element of a sample (sub)set.
+ * Sampling interval - the distance or time between which measurements are taken, also referred to as 'nth selection'
+ * Debt - an error term, signifying the deviation from a configured set point.
+ * Amortization - a projection or strategy to recover accumulated debt.
+ * Window - as in time window or time frame. The sampler sees the evolution of the system in time slices, i.e. in windows.
+ * Rotate - the process of retiring an expired window and installing a new window. Similar somewhat to context switching.
+ *
+ * The adaptive sampler will, on average, guarantee a maximum number of sample points selected from a populuation
+ * over a certain time interval. It is using fixed size time windows and adjusts the sampling interval
+ * for the next window based on what it learned in the past. Each window has a set point, which is the target
+ * number of sample points to select (on average). The sampler keeps a cumulative error term, also called
+ * 'accumulated debt', which is a measure for how much the sampler is deviating from the set point over time.
+ * The maximum number of sample points selected during an individual window is the set point + the accumulated debt.
+ * The 'accumulated debt' is working as a 'spike damper', smoothing out the extremes in a way that the overall
+ * target rate is obeyed without highly over- or under-sampled windows.
+ *
+ * Sample point selection is defined by a sampling interval, which gives instructions for selecting the 'nth' element
+ * in a population. The sampling interval is a geometric random variable, determined by a stochastic process and
+ * recalculated for each window in an effort keep the sample set representative.
+ *
+ * Each window is configured individually, primarily by an instance of the SamplerParams struct. When the sampler
+ * is switching out an old window, because it has expired, but before switching in the next window, it calls a subclass
+ * passing the just expired window as an argument. A subclass can inspect the window to learn about the history
+ * of the system, how the sampler is performing and draw inferences. Based on what it learned, it can choose to have
+ * the sampler reapply an updated set of parameters for the next window. This is a basic feedback control loop that
+.* can be developed for evolving possibly more elaborate sampling schemes in the future.
+ *
+ * With this mechanism, a user can, at a high level, specify that, for example, he/she would like a maximum rate of n
+ * sample points per second. Note that the sampler only guarantees a maxmimum rate of n on average. Naturally, lower rates
+ * will be reported if the system does not produce a population to sustain the requested rate, but it will never report a
+ * rate higher than n.
+ *
+ * One good use of the sampler is to employ it as a throttler, or regulator, to help shape large data sets into smaller,
+ * more managable, sets while still keeping the data somewhat representative.
+ *
  */
 
 struct JfrSamplerParams {
-  size_t samples_per_window;   // the average number of sample points per window
-  size_t window_duration_ms;   // period of time the sampler selects "samples_per_window" number of samples
-  size_t amortization_windows; // future projection / strategy to recover the cumulative deviation (specified in number of windows)
+  size_t sample_points_per_window;  // the number of sample points to select per window on average, the set point for the sampler
+  size_t window_duration_ms;        // period of time the sampler selects n sample points from a population
+  size_t amortization_window_count; // future projection / strategy to recover accumulated debt (specified in number of windows)
 };
 
 class JfrSamplerWindow : public JfrCHeapObj {
@@ -71,14 +101,16 @@ class JfrSamplerWindow : public JfrCHeapObj {
   bool sample();
 
  public:
-  const JfrSamplerParams& params() const;
   size_t population_size() const;
   size_t sample_size() const;
   intptr_t debt() const;
-  intptr_t cumulative_debt() const;
+  intptr_t accumulated_debt() const;
+  const JfrSamplerParams& params() const {
+    return _params;
+  }
 };
 
-class EventSampleWindow;
+class EventSamplerWindow;
 class SamplerSupport;
 
 class JfrAdaptiveSampler : public JfrCHeapObj {
@@ -93,19 +125,18 @@ class JfrAdaptiveSampler : public JfrCHeapObj {
   virtual ~JfrAdaptiveSampler();
   virtual bool initialize();
 
-  void debug(const JfrSamplerWindow* expired) const;
-  void fill(EventSampleWindow& event, const JfrSamplerWindow* expired);
-
   JfrSamplerWindow* active_window() const;
   JfrSamplerWindow* next_window(const JfrSamplerWindow* expired) const;
   void rotate_window(int64_t timestamp);
   void rotate(const JfrSamplerWindow* expired);
   void rotate(const JfrSamplerParams& params, const JfrSamplerWindow* expired, size_t sampling_interval, size_t projected_population_size);
-
   virtual JfrSamplerParams next_window_params(const JfrSamplerWindow* expired) = 0;
 
+  void debug(const JfrSamplerWindow* expired) const;
+  void fill(EventSamplerWindow& event, const JfrSamplerWindow* expired);
+
  public:
-  virtual bool sample(int64_t timestamp = 0);
+  bool sample(int64_t timestamp = 0);
 };
 
 class JfrFixedRateSampler : public JfrAdaptiveSampler {

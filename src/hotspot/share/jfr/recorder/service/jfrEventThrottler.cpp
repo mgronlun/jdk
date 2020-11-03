@@ -28,13 +28,14 @@
 #include "jfr/utilities/jfrAllocation.hpp"
 
  /*
-  * The set is an associated array mapping an event_id (an event type) to a throttler instance.
+  * This is an associative array.
+  * It maps an event type to its throttler instance using the event id as the key.
   */
 template <typename T>
-class JfrEventThrottlerSet : public JfrCHeapObj {
-private:
+class JfrEventThrottlerMap : public JfrCHeapObj {
+ private:
   T* _set[LAST_EVENT_ID + 1];
-public:
+ public:
   bool initialize() {
     for (int i = FIRST_EVENT_ID; i <= LAST_EVENT_ID; i++) {
       _set[i] = new T(static_cast<JfrEventId>(i));
@@ -45,25 +46,19 @@ public:
     return true;
   }
 
-  ~JfrEventThrottlerSet() {
-    for (int i = 0; i <= LAST_EVENT_ID; i++) {
+  ~JfrEventThrottlerMap() {
+    for (int i = FIRST_EVENT_ID; i <= LAST_EVENT_ID; i++) {
       delete _set[i];
       _set[i] = NULL;
     }
   }
 
-  T* map(JfrEventId event_id) {
+  T* get(JfrEventId event_id) {
     return _set[event_id];
   }
 };
 
-static JfrEventThrottlerSet<JfrEventThrottler>* _throttlers = NULL;
-static const uint64_t default_window_duration_ms = 200;
-static const uint64_t default_amortization_count = 1; // in number of windows
 static const JfrSamplerParams _disabled_params = { 0, 0, 0 };
-// The (low) rate, for which the overhead of context switching windows
-// with durations lower than one seconds is not justified.
-static const uint64_t max_rate_for_per_second_window = 9;
 
 JfrEventThrottler::JfrEventThrottler(JfrEventId event_id) :
   JfrAdaptiveSampler(),
@@ -75,9 +70,11 @@ bool JfrEventThrottler::initialize() {
   return JfrAdaptiveSampler::initialize();
 }
 
+static JfrEventThrottlerMap<JfrEventThrottler>* _throttlers = NULL;
+
 bool JfrEventThrottler::create() {
   assert(_throttlers == NULL, "invariant");
-  _throttlers = new JfrEventThrottlerSet<JfrEventThrottler>();
+  _throttlers = new JfrEventThrottlerMap<JfrEventThrottler>();
   return _throttlers != NULL && _throttlers->initialize();
 }
 
@@ -86,29 +83,63 @@ void JfrEventThrottler::destroy() {
   _throttlers = NULL;
 }
 
+JfrEventThrottler* JfrEventThrottler::for_event(JfrEventId event_id) {
+  assert(_throttlers != NULL, "JfrEventThrottler has not been properly initialized");
+  return _throttlers->get(event_id);
+}
+
+bool JfrEventThrottler::accept(JfrEventId event_id, int64_t timestamp) {
+  if (JfrEventSetting::ratelimit(event_id) == 0) {
+    return true;
+  }
+  JfrEventThrottler* const throttler = for_event(event_id);
+  return throttler != NULL ? throttler->sample(timestamp) : true;
+}
+
+/*
+ * Rates lower than or equal to the 'low rate upper bound', are considered special.
+ * They will use a window with duration one second, because the lower rates
+ * do not justify the overhead of more frequent context switching of windows.
+ */
+static const uint64_t low_rate_upper_bound = 9;
+static const uint64_t default_window_duration_ms = 200;
+
 inline void samples_per_window(JfrSamplerParams& params, uint64_t rate_limit_per_second, const JfrSamplerWindow* expired) {
   assert(rate_limit_per_second > 0, "invariant");
   assert(expired != NULL, "invariant");
-  if (rate_limit_per_second <= max_rate_for_per_second_window) {
-    params.samples_per_window = rate_limit_per_second;
+  if (rate_limit_per_second <= low_rate_upper_bound) {
+    params.sample_points_per_window = rate_limit_per_second;
     return;
   }
-  // window duration is in milliseconds and rate_limit in samples per second
+  // Window duration is in milliseconds and the rate_limit is in samples per second.
   const double rate_limit_per_ms = static_cast<double>(rate_limit_per_second) / static_cast<double>(MILLIUNITS);
-  params.samples_per_window = floor(rate_limit_per_ms * default_window_duration_ms);
+  params.sample_points_per_window = floor(rate_limit_per_ms * default_window_duration_ms);
 }
 
 inline void window_duration(JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  assert(params.samples_per_window > 0, "invariant");
-  if (params.samples_per_window <= max_rate_for_per_second_window) {
+  assert(params.sample_points_per_window > 0, "invariant");
+  if (params.sample_points_per_window <= low_rate_upper_bound) {
     params.window_duration_ms = MILLIUNITS; // 1 second
     return;
   }
   params.window_duration_ms = default_window_duration_ms;
 }
 
+/*
+ * This parameter controls how fast 'accumulated debt' should be amortized.
+ * Debt can be thought of as a cumulative error term, and is indicative for how much the sampler
+ * is deviating from a set point. Due to the adaptive nature of the sampler, debt accumulates naturally
+ * over time, as a function of under-and/or oversampled windows, because of system fluctuations.
+ * This parameter controls how fast to catch up / slow down, with the rate given in number of windows.
+ * The default is one window, meaning the sampler should attempt to amortize an accumulated debt immediately
+ * in the next window, if possible. A low amoritization count will on average keep the sampler
+ * closer to the set point. A potential downside with a low amortization count is that some randomness
+ * might be sacrificed in the process of having the sampler catch up more quickly.
+ */
+static const uint64_t default_amortization_count = 1;
+
 inline void amortization(JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  params.amortization_windows = default_amortization_count;
+  params.amortization_window_count = default_amortization_count;
 }
 
 inline void update_params(JfrSamplerParams& params, uint64_t rate_limit_per_second, const JfrSamplerWindow* expired) {
@@ -118,12 +149,13 @@ inline void update_params(JfrSamplerParams& params, uint64_t rate_limit_per_seco
 }
 
 /*
- * This function is the control mechansism for the AdaptiveSampler engine.
+ * This function is the control mechanism for the JfrAdaptiveSampler engine.
  * The engine calls this function when a sampler window has expired, providing the
- * client with an opportunity to perform some analysis. To reciprocate the favor,
- * the client returns an updated set of parameters for the engine to apply to
- * the next window. Try to keep this relatively quick, since the engine
- * is currently inside a critical section, in the process of context switching windows.
+ * client with an opportunity to perform some analysis. To reciprocate, the client
+ * returns an updated set of parameters for the engine to apply to the next window.
+ *
+ * Try to keep relatively quick, since the engine is currently inside a critical section,
+ * in the process of context switching windows.
  */
 JfrSamplerParams JfrEventThrottler::next_window_params(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
@@ -138,14 +170,4 @@ JfrSamplerParams JfrEventThrottler::next_window_params(const JfrSamplerWindow* e
   update_params(_last_params, rate_limit_per_second, expired);
   _last_rate_limit_per_second = rate_limit_per_second;
   return _last_params;
-}
-
-bool JfrEventThrottler::sample(int64_t timestamp /* 0 */) {
-  return JfrEventSetting::ratelimit(_event_id) != 0 ? JfrAdaptiveSampler::sample(timestamp) : true;
-}
-
-bool JfrEventThrottler::sample(JfrEventId event_id, int64_t timestamp) {
-  assert(_throttlers != NULL, "JfrEventThrottler has not been properly initialized");
-  JfrEventThrottler* const throttler = _throttlers->map(event_id);
-  return throttler != NULL ? throttler->sample(timestamp) : true;
 }

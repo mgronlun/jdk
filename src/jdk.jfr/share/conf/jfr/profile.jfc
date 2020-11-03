@@ -783,7 +783,7 @@
       <setting name="period">5 s</setting>
     </event>
 
-    <event name="jdk.SampleWindow">
+    <event name="jdk.SamplerWindow">
       <setting name="enabled">true</setting>
     </event>
 
