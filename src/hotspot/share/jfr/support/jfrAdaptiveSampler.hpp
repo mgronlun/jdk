@@ -56,10 +56,10 @@
  * is switching out an old window, because it has expired, but before switching in the next window, it calls a subclass
  * passing the just expired window as an argument. A subclass can inspect the window to learn about the history
  * of the system, how the sampler is performing and draw inferences. Based on what it learned, it can choose to have
- * the sampler reapply an updated set of parameters for the next window. This is a basic feedback control loop that
-.* can be developed for evolving possibly more elaborate sampling schemes in the future.
+ * the sampler re-apply an updated set of parameters to the next window. This is a basic feedback control loop that
+.* can be developed further, perhaps evolving more elaborate sampling schemes in the future.
  *
- * With this mechanism, a user can, at a high level, specify that, for example, he/she would like a maximum rate of n
+ * Using the AdaptiveSampler mechanism, a user can now, at a high level, specify, for example, that he/she would like amaximum rate of n
  * sample points per second. Note that the sampler only guarantees a maxmimum rate of n on average. Naturally, lower rates
  * will be reported if the system does not produce a population to sustain the requested rate, but it will never report a
  * rate higher than n.
@@ -119,9 +119,11 @@ class JfrAdaptiveSampler : public JfrCHeapObj {
   JfrSamplerWindow* _window_1;
   JfrSamplerWindow* _active_window;
   SamplerSupport* _support;
+  double _avg_population_size;
+  double _ewma_population_size_alpha;
   volatile int _lock;
 
-  JfrAdaptiveSampler();
+  JfrAdaptiveSampler(size_t window_lookback_count);
   virtual ~JfrAdaptiveSampler();
   virtual bool initialize();
 
@@ -130,9 +132,10 @@ class JfrAdaptiveSampler : public JfrCHeapObj {
   void rotate_window(int64_t timestamp);
   void rotate(const JfrSamplerWindow* expired);
   void rotate(const JfrSamplerParams& params, const JfrSamplerWindow* expired, size_t sampling_interval, size_t projected_population_size);
-  virtual JfrSamplerParams next_window_params(const JfrSamplerWindow* expired) = 0;
+  void set_window_lookback_count(size_t count);
+  virtual const JfrSamplerParams& next_window_params(const JfrSamplerWindow* expired) = 0;
 
-  void debug(const JfrSamplerWindow* expired) const;
+  void debug(const JfrSamplerWindow* expired, double avg_population_size) const;
   void fill(EventSamplerWindow& event, const JfrSamplerWindow* expired);
 
  public:
@@ -144,7 +147,7 @@ class JfrFixedRateSampler : public JfrAdaptiveSampler {
   JfrSamplerParams _params;
  public:
   JfrFixedRateSampler(size_t samples_per_window, size_t window_duration_ms);
-  JfrSamplerParams next_window_params(const JfrSamplerWindow* expired) {
+  const JfrSamplerParams& next_window_params(const JfrSamplerWindow* expired) {
     return _params;
   }
 };

@@ -51,12 +51,13 @@ JfrSamplerWindow::JfrSamplerWindow() :
 
 void JfrSamplerWindow::reinitialize(const JfrSamplerParams& params, size_t projected_population_size, size_t sampling_interval) {
   assert(sampling_interval >= 1, "invariant");
-  _projected_population_size = projected_population_size;
-  Atomic::store(&_measured_population_size, static_cast<size_t>(0));
-  _sampling_interval = sampling_interval;
   _params = params;
+  Atomic::store(&_measured_population_size, static_cast<size_t>(0));
+  Atomic::store(&_projected_population_size, projected_population_size);
+  Atomic::store(&_sampling_interval, sampling_interval);
   _start_ticks = params.window_duration_ms == 0 ? 0 : now();
-  _end_ticks = params.window_duration_ms == 0 ? 0 : _start_ticks + millis_to_countertime(params.window_duration_ms);
+  const int64_t end_ticks = params.window_duration_ms == 0 ? 0 : _start_ticks + millis_to_countertime(params.window_duration_ms);
+  Atomic::store(&_end_ticks, end_ticks);
 }
 
 size_t JfrSamplerWindow::population_size_raw() const {
@@ -99,11 +100,17 @@ double JfrSamplerWindow::duration(int64_t end_ticks) const {
   return static_cast<double>(end_ticks - _start_ticks);
 }
 
-JfrAdaptiveSampler::JfrAdaptiveSampler() :
+inline double compute_ewma_alpha_coefficient(size_t lookback_count) {
+  return lookback_count <= 1 ? 1 : static_cast<double>(1) / static_cast<double>(lookback_count);
+}
+
+JfrAdaptiveSampler::JfrAdaptiveSampler(size_t ewma_lookback_count) :
   _window_0(NULL),
   _window_1(NULL),
   _active_window(NULL),
   _support(NULL),
+  _avg_population_size(0),
+  _ewma_population_size_alpha(compute_ewma_alpha_coefficient(ewma_lookback_count)),
   _lock(0) {}
 
 JfrAdaptiveSampler::~JfrAdaptiveSampler() {
@@ -127,6 +134,10 @@ bool JfrAdaptiveSampler::initialize() {
   assert(_support == NULL, "invariant");
   _support = new SamplerSupport(true);
   return _support != NULL;
+}
+
+void JfrAdaptiveSampler::set_window_lookback_count(size_t count) {
+  _ewma_population_size_alpha = compute_ewma_alpha_coefficient(count);
 }
 
 inline JfrSamplerWindow* JfrAdaptiveSampler::active_window() const {
@@ -155,12 +166,13 @@ bool JfrSamplerWindow::sample(int64_t timestamp, bool* expired_window) {
 }
 
 inline bool JfrSamplerWindow::is_expired(int64_t timestamp) const {
-  return timestamp == 0 ? now() >= _end_ticks : timestamp >= _end_ticks;
+  const int64_t end_ticks = Atomic::load(&_end_ticks);
+  return timestamp == 0 ? now() >= end_ticks : timestamp >= end_ticks;
 }
 
 inline bool JfrSamplerWindow::sample() {
   const size_t ordinal = Atomic::add(&_measured_population_size, (size_t)1);
-  return ordinal <= _projected_population_size && ordinal % _sampling_interval == 0;
+  return ordinal <= Atomic::load(&_projected_population_size) && ordinal % Atomic::load(&_sampling_interval) == 0;
 }
 
 // Called exclusively by the holder of the try lock
@@ -174,7 +186,7 @@ void JfrAdaptiveSampler::rotate_window(int64_t timestamp) {
     return;
   }
   current->normalize(timestamp);
-  debug(current);
+  debug(current, _avg_population_size);
   fill(event, current);
   rotate(current);
   event.commit();
@@ -184,38 +196,86 @@ inline void JfrSamplerWindow::normalize(int64_t timestamp) {
   _normalization_factor = duration(_end_ticks) / duration(timestamp == 0 ? now() : timestamp);
 }
 
-static intptr_t amortization_payment(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  const intptr_t inverse_accumulated_debt = -expired->accumulated_debt(); // negation
+void JfrAdaptiveSampler::debug(const JfrSamplerWindow* expired, double avg_population_size) const {
+  assert(expired == active_window(), "invariant");
+  const JfrSamplerParams& params = expired->params();
+  if (params.window_duration_ms == 0) {
+    printf("Sampling started...\n");
+    return;
+  }
+  printf("=== sample size: %f, population size: %f, ratio: %f, limit: %f, deviation: %f, cum.deviation: %f, avg pop size: %f\n",
+    (double)expired->sample_size(), (double)expired->population_size(),
+    expired->population_size() == 0 ? 0 : (double)expired->sample_size() / (double)expired->population_size(),
+    (double)expired->max_sample_size(),
+    (double)expired->debt(), (double)expired->accumulated_debt(), avg_population_size);
+}
+
+void JfrAdaptiveSampler::fill(EventSamplerWindow& event, const JfrSamplerWindow* expired) {
+  assert(expired == active_window(), "invariant");
+  const JfrSamplerParams& params = expired->params();
+  event.set_setPoint(params.sample_points_per_window);
+  event.set_windowDuration(params.window_duration_ms);
+  const size_t sample_size = expired->sample_size();
+  event.set_sampleSize(sample_size);
+  event.set_sampleSizeRaw(expired->sample_size_raw());
+  const size_t population_size = expired->population_size();
+  event.set_populationSize(population_size);
+  event.set_ratio(population_size == 0 ? 0 : static_cast<double>(sample_size) / static_cast<double>(population_size));
+  event.set_debt(expired->debt());
+  event.set_accumulatedDebt(expired->accumulated_debt());
+}
+
+static size_t amortization_payment(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+  const size_t inverse_accumulated_debt = -expired->accumulated_debt(); // negation
   if (params.amortization_window_count <= 1) {
     return inverse_accumulated_debt;
   }
   return floor(static_cast<double>(inverse_accumulated_debt) / static_cast<double>(params.amortization_window_count));
 }
 
-static size_t sample_size_for_next_window(const JfrSamplerParams& param, const JfrSamplerWindow* expired) {
-  const intptr_t sample_size = static_cast<intptr_t>(param.sample_points_per_window) + amortization_payment(param, expired);
-  return sample_size < 0 ? 0 : sample_size;
+static size_t sample_size_for_next_window(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+  return params.sample_points_per_window + amortization_payment(params, expired);
 }
 
-static size_t sampling_interval_for_next_window(const JfrSamplerWindow* expired, SamplerSupport* support, size_t projected_sample_size) {
-  assert(expired != NULL, "invariant");
+static size_t sampling_interval_for_next_window(SamplerSupport* support, size_t projected_sample_size, double avg_population_size) {
   assert(support != NULL, "invariant");
-  if (projected_sample_size == 0) {
+  if (projected_sample_size <= 0) {
     return 1;
   }
-  const double projected_geometric_mean = static_cast<double>(expired->population_size()) / static_cast<double>(projected_sample_size);
+  const double projected_geometric_mean = avg_population_size / static_cast<double>(projected_sample_size);
   // The sampling interval is a geometric random variable with the specified mean.
   const size_t sampling_interval = support->pick_next_geometric_sample(projected_geometric_mean);
+  printf("projected geometric mean: %f, sampling interval %llu\n", projected_geometric_mean, sampling_interval);
   assert(sampling_interval > 0, "invariant");
   return sampling_interval;
+}
+
+/*
+ * Exponentially Weighted Moving Average (EWMA):
+ *
+ * Y is a datapoint (at time t)
+ * S is the current EMWA (at time t-1)
+ * alpha represents the degree of weighting decrease, a constant smoothing factor between 0 and 1.
+ *
+ * A higher alpha discounts older observations faster.
+ * Returns the new EWMA for S
+*/
+inline double exponentially_weighted_moving_average(double Y, double alpha, double S) {
+  return alpha * Y + (1 - alpha) * S;
+}
+
+static double population_size_for_next_window(const JfrSamplerWindow* expired, double ewma_population_size_alpha, double avg_population_size) {
+  assert(expired != NULL, "invariant");
+  return exponentially_weighted_moving_average(expired->population_size(), ewma_population_size_alpha, avg_population_size);
 }
 
 void JfrAdaptiveSampler::rotate(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
   assert(expired == active_window(), "invariant");
-  JfrSamplerParams params = next_window_params(expired);
+  const JfrSamplerParams& params = next_window_params(expired);
   const size_t projected_sample_size = sample_size_for_next_window(params, expired);
-  const size_t sampling_interval = sampling_interval_for_next_window(expired, _support, projected_sample_size);
+  _avg_population_size = population_size_for_next_window(expired, _ewma_population_size_alpha, _avg_population_size);
+  const size_t sampling_interval = sampling_interval_for_next_window(_support, projected_sample_size, _avg_population_size);
   assert(sampling_interval >= 1, "invariant");
   rotate(params, expired, projected_sample_size * sampling_interval, sampling_interval);
 }
@@ -234,31 +294,3 @@ inline JfrSamplerWindow* JfrAdaptiveSampler::next_window(const JfrSamplerWindow*
   return expired == _window_0 ? _window_1 : _window_0;
 }
 
-void JfrAdaptiveSampler::debug(const JfrSamplerWindow* expired) const {
-  assert(expired == active_window(), "invariant");
-  const JfrSamplerParams& params = expired->params();
-  if (params.window_duration_ms == 0) {
-    printf("Sampling started...\n");
-    return;
-  }
-  printf("=== sample size: %f, population size: %f, ratio: %f, limit: %f, deviation: %f, cum.deviation: %f\n",
-    (double)expired->sample_size(), (double)expired->population_size(),
-    expired->population_size() == 0 ? 0 : (double)expired->sample_size() / (double)expired->population_size(),
-    (double)expired->max_sample_size(),
-    (double)expired->debt(), (double)expired->accumulated_debt());
-}
-
-void JfrAdaptiveSampler::fill(EventSamplerWindow& event, const JfrSamplerWindow* expired) {
-  assert(expired == active_window(), "invariant");
-  const JfrSamplerParams& params = expired->params();
-  event.set_setPoint(params.sample_points_per_window);
-  event.set_windowDuration(params.window_duration_ms);
-  const size_t sample_size = expired->sample_size();
-  event.set_sampleSize(sample_size);
-  event.set_sampleSizeRaw(expired->sample_size_raw());
-  const size_t population_size = expired->population_size();
-  event.set_populationSize(population_size);
-  event.set_ratio(population_size == 0 ? 0 : static_cast<double>(sample_size) / static_cast<double>(population_size));
-  event.set_debt(expired->debt());
-  event.set_accumulatedDebt(expired->accumulated_debt());
-}

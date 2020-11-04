@@ -34,9 +34,10 @@ class JfrEventThrottler : public JfrAdaptiveSampler {
   JfrEventId _event_id;
   JfrSamplerParams _last_params;
   int64_t _last_rate_limit_per_second;
+  const JfrSamplerParams& last_params(int64_t rate_limit_per_second, const JfrSamplerWindow* expired);
   static bool create();
   static void destroy();
-  JfrSamplerParams next_window_params(const JfrSamplerWindow* expired) override;
+  const JfrSamplerParams& next_window_params(const JfrSamplerWindow* expired) override;
  public:
   JfrEventThrottler(JfrEventId event_id);
   bool initialize() override;

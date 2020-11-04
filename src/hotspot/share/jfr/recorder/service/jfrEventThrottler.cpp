@@ -59,9 +59,11 @@ class JfrEventThrottlerMap : public JfrCHeapObj {
 };
 
 static const JfrSamplerParams _disabled_params = { 0, 0, 0 };
+static const size_t default_window_duration_ms = 200;
+static const size_t window_lookback_count = 32;
 
 JfrEventThrottler::JfrEventThrottler(JfrEventId event_id) :
-  JfrAdaptiveSampler(),
+  JfrAdaptiveSampler(window_lookback_count),
   _event_id(event_id),
   _last_params(_disabled_params),
   _last_rate_limit_per_second(0) {}
@@ -98,11 +100,10 @@ bool JfrEventThrottler::accept(JfrEventId event_id, int64_t timestamp) {
 
 /*
  * Rates lower than or equal to the 'low rate upper bound', are considered special.
- * They will use a window with duration one second, because the lower rates
+ * They will use a window with duration one second, because the rates are so low they
  * do not justify the overhead of more frequent context switching of windows.
  */
-static const uint64_t low_rate_upper_bound = 9;
-static const uint64_t default_window_duration_ms = 200;
+static const size_t low_rate_upper_bound = 9;
 
 inline void samples_per_window(JfrSamplerParams& params, uint64_t rate_limit_per_second, const JfrSamplerWindow* expired) {
   assert(rate_limit_per_second > 0, "invariant");
@@ -142,10 +143,12 @@ inline void amortization(JfrSamplerParams& params, const JfrSamplerWindow* expir
   params.amortization_window_count = default_amortization_count;
 }
 
-inline void update_params(JfrSamplerParams& params, uint64_t rate_limit_per_second, const JfrSamplerWindow* expired) {
-  samples_per_window(params, rate_limit_per_second, expired);
-  window_duration(params, expired);
-  amortization(params, expired);
+const JfrSamplerParams& JfrEventThrottler::last_params(int64_t rate_limit_per_second, const JfrSamplerWindow* expired) {
+  samples_per_window(_last_params, rate_limit_per_second, expired);
+  window_duration(_last_params, expired);
+  amortization(_last_params, expired);
+  _last_rate_limit_per_second = rate_limit_per_second;
+  return _last_params;
 }
 
 /*
@@ -157,7 +160,7 @@ inline void update_params(JfrSamplerParams& params, uint64_t rate_limit_per_seco
  * Try to keep relatively quick, since the engine is currently inside a critical section,
  * in the process of context switching windows.
  */
-JfrSamplerParams JfrEventThrottler::next_window_params(const JfrSamplerWindow* expired) {
+const JfrSamplerParams& JfrEventThrottler::next_window_params(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
   const int64_t rate_limit_per_second = JfrEventSetting::ratelimit(_event_id);
   if (rate_limit_per_second == 0) {
@@ -166,8 +169,6 @@ JfrSamplerParams JfrEventThrottler::next_window_params(const JfrSamplerWindow* e
   if (rate_limit_per_second == _last_rate_limit_per_second) {
     return _last_params;
   }
-  // update_params modifies _last_params in-place
-  update_params(_last_params, rate_limit_per_second, expired);
-  _last_rate_limit_per_second = rate_limit_per_second;
-  return _last_params;
+  // last_params() modifies _last_params in-place
+  return last_params(rate_limit_per_second, expired);
 }
