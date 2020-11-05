@@ -40,29 +40,29 @@
  * Rotate - the process of retiring an expired window and installing a new window. Similar somewhat to context switching.
  *
  * The adaptive sampler will, on average, guarantee a maximum number of sample points selected from a populuation
- * over a certain time interval. It is using fixed size time windows and adjusts the sampling interval
- * for the next window based on what it learned in the past. Each window has a set point, which is the target
- * number of sample points to select (on average). The sampler keeps a cumulative error term, also called
- * 'accumulated debt', which is a measure for how much the sampler is deviating from the set point over time.
- * The maximum number of sample points selected during an individual window is the set point + the accumulated debt.
- * The 'accumulated debt' is working as a 'spike damper', smoothing out the extremes in a way that the overall
+ * over a certain time interval. It is using fixed size time windows and adjusts the sampling interval for the next
+ * window based on what it learned in the past. Each window has a set point, which is the target number of sample points
+ * to select (on average). The sampler keeps a cumulative error term, also called 'accumulated debt', which is a measure
+ * for how much the sampler is deviating from the set point over time. The maximum number of sample points selected
+ * during an individual window is the set point + the accumulated debt.
+ * Hence, the 'accumulated debt' is also working as a 'spike damper', smoothing out the extremes in a way that the overall
  * target rate is obeyed without highly over- or under-sampled windows.
  *
  * Sample point selection is defined by a sampling interval, which gives instructions for selecting the 'nth' element
  * in a population. The sampling interval is a geometric random variable, determined by a stochastic process and
  * recalculated for each window in an effort keep the sample set representative.
  *
- * Each window is configured individually, primarily by an instance of the SamplerParams struct. When the sampler
- * is switching out an old window, because it has expired, but before switching in the next window, it calls a subclass
- * passing the just expired window as an argument. A subclass can inspect the window to learn about the history
- * of the system, how the sampler is performing and draw inferences. Based on what it learned, it can choose to have
- * the sampler re-apply an updated set of parameters to the next window. This is a basic feedback control loop that
+ * Each window is configured individually, by an instance of the SamplerParams struct. When the sampler switches out
+ * an old window, because it has expired, but before switching in the next window, it calls a subclass with the just
+ * expired window as an argument. A subclass can inspect the window to study the history of the system and also get
+ * an overview of how the sampler is performing to help draw inferences. Based on what it learned, it can choose to
+ * let the sampler re-apply an updated set of parameters to the next window. This is a basic feedback control loop that
 .* can be developed further, perhaps evolving more elaborate sampling schemes in the future.
  *
- * Using the AdaptiveSampler mechanism, a user can now, at a high level, specify, for example, that he/she would like amaximum rate of n
- * sample points per second. Note that the sampler only guarantees a maxmimum rate of n on average. Naturally, lower rates
- * will be reported if the system does not produce a population to sustain the requested rate, but it will never report a
- * rate higher than n.
+ * Using the AdaptiveSampler mechanism, a user can now, at a high level, specify, for example, that he/she would like a
+ * maximum rate of n sample points per second. Note that the sampler only guarantees a maxmimum rate of n on average.
+ * Naturally, lower rates will be reported if the system does not produce a population to sustain the requested rate,
+ * but n per second is respected as a maximum limit hence it will never report an average rate higher than n per second.
  *
  * One good use of the sampler is to employ it as a throttler, or regulator, to help shape large data sets into smaller,
  * more managable, sets while still keeping the data somewhat representative.

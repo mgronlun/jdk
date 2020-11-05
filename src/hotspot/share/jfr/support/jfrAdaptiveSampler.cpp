@@ -44,10 +44,10 @@ inline double millis_to_countertime(int64_t millis) {
 JfrSamplerWindow::JfrSamplerWindow() :
   _start_ticks(0),
   _end_ticks(0),
-  _normalization_factor(0),
   _sampling_interval(1),
   _projected_population_size(0),
-  _measured_population_size(0) {}
+  _measured_population_size(0),
+  _normalization_factor(0) {}
 
 void JfrSamplerWindow::reinitialize(const JfrSamplerParams& params, size_t projected_population_size, size_t sampling_interval) {
   assert(sampling_interval >= 1, "invariant");
@@ -186,7 +186,7 @@ void JfrAdaptiveSampler::rotate_window(int64_t timestamp) {
     return;
   }
   current->normalize(timestamp);
-  debug(current, _avg_population_size);
+  // debug(current, _avg_population_size);
   fill(event, current);
   rotate(current);
   event.commit();
@@ -223,6 +223,7 @@ void JfrAdaptiveSampler::fill(EventSamplerWindow& event, const JfrSamplerWindow*
   event.set_ratio(population_size == 0 ? 0 : static_cast<double>(sample_size) / static_cast<double>(population_size));
   event.set_debt(expired->debt());
   event.set_accumulatedDebt(expired->accumulated_debt());
+  event.set_lookbackCount(1 / _ewma_population_size_alpha);
 }
 
 static size_t amortization_payment(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
@@ -245,7 +246,7 @@ static size_t sampling_interval_for_next_window(SamplerSupport* support, size_t 
   const double projected_geometric_mean = avg_population_size / static_cast<double>(projected_sample_size);
   // The sampling interval is a geometric random variable with the specified mean.
   const size_t sampling_interval = support->pick_next_geometric_sample(projected_geometric_mean);
-  printf("projected geometric mean: %f, sampling interval %llu\n", projected_geometric_mean, sampling_interval);
+  // printf("projected geometric mean: %f, sampling interval %llu\n", projected_geometric_mean, sampling_interval);
   assert(sampling_interval > 0, "invariant");
   return sampling_interval;
 }

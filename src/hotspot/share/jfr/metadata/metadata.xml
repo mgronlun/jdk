@@ -1097,6 +1097,7 @@
     <Field type="float" name="ratio" label="Sample To Population Ratio" />
     <Field type="long"  name="debt" label="Debt" />
     <Field type="long"  name="accumulatedDebt" label="Accumulated Debt" />
+    <Field type="long"  name="lookbackCount" label="Window Lookback Count" />
   </Event>
 
   <Event name="HeapDump" category="Java Virtual Machine, Diagnostics" label="Heap Dump" stackTrace="true" thread="true">

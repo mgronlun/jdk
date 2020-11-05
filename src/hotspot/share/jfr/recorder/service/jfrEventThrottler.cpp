@@ -60,7 +60,7 @@ class JfrEventThrottlerMap : public JfrCHeapObj {
 
 static const JfrSamplerParams _disabled_params = { 0, 0, 0 };
 static const size_t default_window_duration_ms = 200;
-static const size_t window_lookback_count = 32;
+static const size_t window_lookback_count = 25;
 
 JfrEventThrottler::JfrEventThrottler(JfrEventId event_id) :
   JfrAdaptiveSampler(window_lookback_count),
