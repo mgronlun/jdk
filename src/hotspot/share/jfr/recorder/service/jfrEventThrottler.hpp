@@ -30,6 +30,7 @@
 
 class JfrEventThrottler : public JfrAdaptiveSampler {
   friend class JfrRecorder;
+  friend class JfrRecorderService;
  private:
   JfrEventId _event_id;
   JfrSamplerParams _last_params;
@@ -37,10 +38,12 @@ class JfrEventThrottler : public JfrAdaptiveSampler {
   const JfrSamplerParams& last_params(int64_t rate_limit_per_second, const JfrSamplerWindow* expired);
   static bool create();
   static void destroy();
+  static void clear();
   const JfrSamplerParams& next_window_params(const JfrSamplerWindow* expired) override;
  public:
   JfrEventThrottler(JfrEventId event_id);
   bool initialize() override;
+  bool set_ratelimit(int64_t rate_limit);
   static JfrEventThrottler* for_event(JfrEventId event_id);
   static bool accept(JfrEventId event_id, int64_t timestamp);
 };

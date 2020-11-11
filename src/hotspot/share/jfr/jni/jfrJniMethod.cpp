@@ -35,6 +35,7 @@
 #include "jfr/recorder/repository/jfrRepository.hpp"
 #include "jfr/recorder/repository/jfrChunkRotation.hpp"
 #include "jfr/recorder/repository/jfrChunkWriter.hpp"
+#include "jfr/recorder/service/jfrEventThrottler.hpp"
 #include "jfr/recorder/service/jfrOptionSet.hpp"
 #include "jfr/recorder/stacktrace/jfrStackTraceRepository.hpp"
 #include "jfr/recorder/stringpool/jfrStringPool.hpp"
@@ -176,7 +177,7 @@ NO_TRANSITION(jboolean, jfr_set_cutoff(JNIEnv* env, jobject jvm, jlong event_typ
 NO_TRANSITION_END
 
 NO_TRANSITION(jboolean, jfr_set_ratelimit(JNIEnv* env, jobject jvm, jlong event_type_id, jlong rate_limit))
-  return JfrEventSetting::set_ratelimit(event_type_id, rate_limit) ? JNI_TRUE : JNI_FALSE;
+  return JfrEventThrottler::for_event(static_cast<JfrEventId>(event_type_id))->set_ratelimit(rate_limit) ? JNI_TRUE : JNI_FALSE;
 NO_TRANSITION_END
 
 NO_TRANSITION(jboolean, jfr_should_rotate_disk(JNIEnv* env, jobject jvm))

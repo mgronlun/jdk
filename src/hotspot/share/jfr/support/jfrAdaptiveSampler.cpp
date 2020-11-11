@@ -29,6 +29,7 @@
 #include "jfr/utilities/jfrTimeConverter.hpp"
 #include "jfr/utilities/jfrTryLock.hpp"
 #include "runtime/atomic.hpp"
+#include "runtime/orderAccess.hpp"
 #include "runtime/samplerSupport.hpp"
 #include "utilities/globalDefinitions.hpp"
 #include <cmath>
@@ -37,8 +38,8 @@ inline int64_t now() {
   return JfrTicks::now().value();
 }
 
-inline double millis_to_countertime(int64_t millis) {
-  return static_cast<double>(JfrTimeConverter::nanos_to_countertime(millis * 1000000));
+inline int64_t millis_to_countertime(int64_t millis) {
+  return JfrTimeConverter::nanos_to_countertime(millis * NANOSECS_PER_MILLISEC);
 }
 
 JfrSamplerWindow::JfrSamplerWindow() :
@@ -79,7 +80,7 @@ intptr_t JfrSamplerWindow::debt() const {
 }
 
 intptr_t JfrSamplerWindow::accumulated_debt() const {
-  return static_cast<intptr_t>((_params.sample_points_per_window) - max_sample_size()) + debt();
+  return static_cast<intptr_t>(_params.sample_points_per_window - max_sample_size()) + debt();
 }
 
 inline double compute_ewma_alpha_coefficient(size_t lookback_count) {
@@ -93,7 +94,8 @@ JfrAdaptiveSampler::JfrAdaptiveSampler(size_t ewma_lookback_count) :
   _support(NULL),
   _avg_population_size(0),
   _ewma_population_size_alpha(compute_ewma_alpha_coefficient(ewma_lookback_count)),
-  _lock(0) {}
+  _lock(0),
+  _reset(true) {}
 
 JfrAdaptiveSampler::~JfrAdaptiveSampler() {
   delete _window_0;
@@ -116,6 +118,13 @@ bool JfrAdaptiveSampler::initialize() {
   assert(_support == NULL, "invariant");
   _support = new SamplerSupport(true);
   return _support != NULL;
+}
+
+void JfrAdaptiveSampler::reset() {
+  while (Atomic::cmpxchg(&_lock, 0, 1) == 1);
+  _reset = true;
+  OrderAccess::fence();
+  _lock = 0;
 }
 
 void JfrAdaptiveSampler::set_window_lookback_count(size_t count) {
@@ -150,7 +159,7 @@ inline bool JfrSamplerWindow::is_expired(int64_t timestamp) const {
 }
 
 inline bool JfrSamplerWindow::sample() {
-  const size_t ordinal = Atomic::add(&_measured_population_size, (size_t)1);
+  const size_t ordinal = Atomic::add(&_measured_population_size, static_cast<size_t>(1));
   return ordinal <= _projected_population_size && ordinal % _sampling_interval == 0;
 }
 
@@ -161,12 +170,15 @@ void JfrAdaptiveSampler::rotate_window(int64_t timestamp) {
   EventSamplerWindow event;
   JfrSamplerWindow* const current = active_window();
   if (!current->is_expired(timestamp)) {
-    // Someone else took care of it.
+    // Someone took care of it.
     return;
   }
   // debug(current, _avg_population_size);
   fill(event, current);
   rotate(current);
+  if (_reset) {
+    _reset = false;
+  }
   event.commit();
 }
 
@@ -201,20 +213,22 @@ void JfrAdaptiveSampler::fill(EventSamplerWindow& event, const JfrSamplerWindow*
 }
 
 static size_t amortization_payment(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+  assert(expired != NULL, "invariant");
   const size_t inverse_accumulated_debt = -expired->accumulated_debt(); // negation
   if (params.amortization_window_count <= 1) {
     return inverse_accumulated_debt;
   }
-  return floor(static_cast<double>(inverse_accumulated_debt) / static_cast<double>(params.amortization_window_count));
+  return inverse_accumulated_debt / params.amortization_window_count;
 }
 
-static size_t sample_size_for_next_window(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  return params.sample_points_per_window + amortization_payment(params, expired);
+// reset is used to discard the current accumulated debt, useful for states that model some kind of restart.
+static size_t sample_size_for_next_window(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool reset) {
+  return reset ? params.sample_points_per_window : params.sample_points_per_window + amortization_payment(params, expired);
 }
 
 static size_t sampling_interval_for_next_window(SamplerSupport* support, size_t projected_sample_size, double avg_population_size) {
   assert(support != NULL, "invariant");
-  if (projected_sample_size <= 0) {
+  if (projected_sample_size == 0) {
     return 1;
   }
   const size_t projected_geometric_mean = avg_population_size / projected_sample_size;
@@ -248,7 +262,7 @@ void JfrAdaptiveSampler::rotate(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
   assert(expired == active_window(), "invariant");
   const JfrSamplerParams& params = next_window_params(expired);
-  const size_t projected_sample_size = sample_size_for_next_window(params, expired);
+  const size_t projected_sample_size = sample_size_for_next_window(params, expired, _reset);
   _avg_population_size = population_size_for_next_window(expired, _ewma_population_size_alpha, _avg_population_size);
   const size_t sampling_interval = sampling_interval_for_next_window(_support, projected_sample_size, _avg_population_size);
   assert(sampling_interval >= 1, "invariant");

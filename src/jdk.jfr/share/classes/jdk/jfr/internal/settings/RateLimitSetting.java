@@ -56,13 +56,18 @@ public final class RateLimitSetting extends JDKSettingControl {
 
     @Override
     public String combine(Set<String> values) {
-        long min = Long.MAX_VALUE;
+        long max = 0;
         String text = "0";
         for (String value : values) {
             long l = parseValueSafe(value);
-            if (l < min) {
+            if (l == 0) {
+                // throttling disabled -> accept everything
+                text = "0";
+                break;
+            }
+            if (l > max) {
                 text = value;
-                min = l;
+                max = l;
             }
         }
         return text;

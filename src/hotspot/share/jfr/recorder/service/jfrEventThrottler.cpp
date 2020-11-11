@@ -72,6 +72,12 @@ bool JfrEventThrottler::initialize() {
   return JfrAdaptiveSampler::initialize();
 }
 
+bool JfrEventThrottler::set_ratelimit(int64_t rate_limit) {
+  JfrEventSetting::set_ratelimit(_event_id, rate_limit);
+  reset();
+  return true;
+}
+
 static JfrEventThrottlerMap<JfrEventThrottler>* _throttlers = NULL;
 
 bool JfrEventThrottler::create() {
