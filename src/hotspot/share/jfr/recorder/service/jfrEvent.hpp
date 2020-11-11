@@ -65,10 +65,13 @@ class JfrEvent {
   jlong _end_time;
   bool _started;
   bool _untimed;
+  bool _should_commit;
+  bool _evaluated;
 
  protected:
   JfrEvent(EventStartTime timing=TIMED) : _start_time(0), _end_time(0),
-                                          _started(false), _untimed(timing == UNTIMED)
+                                          _started(false), _untimed(timing == UNTIMED),
+                                          _should_commit(false), _evaluated(false)
 #ifdef ASSERT
   , _verifier()
 #endif
@@ -82,19 +85,12 @@ class JfrEvent {
   }
 
   void commit() {
-    if (!should_commit()) {
+    assert(!_verifier.committed(), "event already committed");
+    if (!should_write()) {
       return;
     }
-    assert(!_verifier.committed(), "event already committed");
-    if (_start_time == 0) {
-      set_starttime(JfrTicks::now());
-    } else if (_end_time == 0) {
-      set_endtime(JfrTicks::now());
-    }
-    if (should_write()) {
-      write_event();
-      DEBUG_ONLY(_verifier.set_committed();)
-    }
+    write_event();
+    DEBUG_ONLY(_verifier.set_committed();)
   }
 
  public:
@@ -151,12 +147,30 @@ class JfrEvent {
   }
 
   bool should_commit() {
-    return _started;
+    if (!_started) {
+      return false;
+    }
+    if (_evaluated) {
+      return _should_commit;
+    }
+    _should_commit = evaluate();
+    _evaluated = true;
+    return _should_commit;
   }
 
  private:
   bool should_write() {
-    if (T::isInstant || T::isRequestable || T::hasCutoff) {
+    return _started && (_evaluated ? _should_commit : evaluate());
+  }
+
+  bool evaluate() {
+    assert(_started, "invariant");
+    if (_start_time == 0) {
+      set_starttime(JfrTicks::now());
+    } else if (_end_time == 0) {
+      set_endtime(JfrTicks::now());
+    }
+    if (T::isInstant || T::isRequestable) {
       return T::hasRateLimit ? JfrEventThrottler::accept(T::eventId, _untimed ? 0 : _start_time) : true;
     }
     if (_end_time - _start_time < JfrEventSetting::threshold(T::eventId)) {

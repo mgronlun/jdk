@@ -335,10 +335,10 @@ static void verify_or_generate_log_table() {
 // pRNG is: aX+b mod c with a = 0x5DEECE66D, b =  0xB, c = 1<<48
 // This is the lrand64 generator.
 static uint64_t next_random(uint64_t rnd) {
-  const uint64_t PrngMult = 0x5DEECE66DLL;
-  const uint64_t PrngAdd = 0xB;
-  const uint64_t PrngModPower = 48;
-  const uint64_t PrngModMask = ((uint64_t)1 << PrngModPower) - 1;
+  static const uint64_t PrngMult = 0x5DEECE66DLL;
+  static const uint64_t PrngAdd = 0xB;
+  static const uint64_t PrngModPower = 48;
+  static const uint64_t PrngModMask = ((uint64_t)1 << PrngModPower) - 1;
   //assert(IS_SAFE_SIZE_MUL(PrngMult, rnd), "Overflow on multiplication.");
   //assert(IS_SAFE_SIZE_ADD(PrngMult * rnd, PrngAdd), "Overflow on addition.");
   return (PrngMult * rnd + PrngAdd) & PrngModMask;
@@ -366,7 +366,7 @@ double SamplerSupport::next_random_uniform() {
   // 5194297183973780480 bytes.  In this case,
   // for sample_parameter = 1<<19, max possible step is
   // 9448372 bytes (24 bits).
-  const uint64_t PrngModPower = 48;  // Number of bits in prng
+  static const uint64_t PrngModPower = 48;  // Number of bits in prng
   // The uint32_t cast is to prevent a (hard-to-reproduce) NAN
   // under piii debug for some binaries.
   // the n_rand value is between 0 and 2**26-1 so it needs to be normalized by dividing by 2**26 (67108864)
@@ -374,18 +374,16 @@ double SamplerSupport::next_random_uniform() {
 }
 
 static double fast_log2(const double& d) {
+  assert(d > 0, "bad value passed to assert");
 #ifndef PRODUCT
   if (!log_table_checked) {
     verify_or_generate_log_table();
   }
 #endif
-  assert(d>0, "bad value passed to assert");
-  uint64_t x = 0;
-  assert(sizeof(d) == sizeof(x),
-         "double and uint64_t do not have the same size");
-  x = *reinterpret_cast<const uint64_t*>(&d);
+  static_assert(FastLogNumBits <= 20, "FastLogNumBits should be less than 20.");
+  const uint64_t x = *reinterpret_cast<const uint64_t*>(&d);
+  static_assert(sizeof(d) == sizeof(x), "double and uint64_t do not have the same size");
   const uint32_t x_high = x >> 32;
-  assert(FastLogNumBits <= 20, "FastLogNumBits should be less than 20.");
   const uint32_t y = x_high >> (20 - FastLogNumBits) & FastLogMask;
   const int32_t exponent = ((x_high >> 20) & 0x7FF) - 1023;
   return exponent + log_table[y];
@@ -409,7 +407,7 @@ size_t SamplerSupport::pick_next_geometric_sample(size_t mean) {
   // 5194297183973780480 bytes.  In this case,
   // for sample_parameter = 1<<19, max possible step is
   // 9448372 bytes (24 bits).
-  const uint64_t PrngModPower = 48;  // Number of bits in prng
+  static const uint64_t PrngModPower = 48;  // Number of bits in prng
   // The uint32_t cast is to prevent a (hard-to-reproduce) NAN
   // under piii debug for some binaries.
   double q = static_cast<uint32_t>(n_rnd >> (PrngModPower - 26)) + 1.0;
@@ -419,7 +417,7 @@ size_t SamplerSupport::pick_next_geometric_sample(size_t mean) {
   // The value 26.000705 is used rather than 26 to compensate
   // for inaccuracies in FastLog2 which otherwise result in a
   // negative answer.
-  double log_val = (fast_log2(q) - 26.000705);
+  const double log_val = (fast_log2(q) - 26.000705);
   double result =
       (0.0 < log_val ? 0.0 : log_val) * (-log(2.0) * (mean)) + 1;
   assert(result > 0 && result < SIZE_MAX, "Result is not in an acceptable range.");

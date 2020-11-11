@@ -48,7 +48,7 @@ public @interface RateLimit {
     /**
      * Settings name {@code "ratelimit"} for configuring event rate limit.
      */
-    public final static String NAME = "ratelimit";
+    public final static String NAME = "rateLimit";
     public final static int DEFAULT = 100;
 
     /**

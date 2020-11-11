@@ -79,24 +79,15 @@ class JfrSamplerWindow : public JfrCHeapObj {
   friend class JfrAdaptiveSampler;
  private:
   JfrSamplerParams _params = { 0, 0, 0 };
-  int64_t _start_ticks;
-  int64_t _end_ticks;
+  volatile int64_t _end_ticks;
   size_t _sampling_interval;
   size_t _projected_population_size;
   volatile size_t _measured_population_size;
-  double _normalization_factor;
-
-  size_t population_size_raw() const;
-  size_t sample_size_raw() const;
-  size_t sample_size(size_t population_size) const;
-  size_t max_sample_size() const;
 
   JfrSamplerWindow();
   void reinitialize(const JfrSamplerParams& params, size_t projected_population_size, size_t sampling_interval);
-  double duration(int64_t end_ticks) const;
   bool is_expired(int64_t timestamp) const;
-  void normalize(int64_t timestamp);
-
+  size_t max_sample_size() const;
   bool sample(int64_t timestamp, bool* is_expired);
   bool sample();
 
@@ -131,7 +122,7 @@ class JfrAdaptiveSampler : public JfrCHeapObj {
   JfrSamplerWindow* next_window(const JfrSamplerWindow* expired) const;
   void rotate_window(int64_t timestamp);
   void rotate(const JfrSamplerWindow* expired);
-  void rotate(const JfrSamplerParams& params, const JfrSamplerWindow* expired, size_t sampling_interval, size_t projected_population_size);
+  void rotate(const JfrSamplerParams& params, const JfrSamplerWindow* expired, size_t projected_sample_size, size_t sampling_interval);
   void set_window_lookback_count(size_t count);
   virtual const JfrSamplerParams& next_window_params(const JfrSamplerWindow* expired) = 0;
 

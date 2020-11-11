@@ -78,7 +78,6 @@ public final class EventControl {
     private final String idName;
 
     EventControl(PlatformEventType eventType) {
-        addControl(Enabled.NAME, defineEnabled(eventType));
         if (eventType.hasDuration()) {
             addControl(Threshold.NAME, defineThreshold(eventType));
         }
@@ -95,10 +94,12 @@ public final class EventControl {
             addControl(RateLimit.NAME, defineRateLimit(eventType));
         }
 
+        addControl(Enabled.NAME, defineEnabled(eventType));
+
         ArrayList<AnnotationElement> aes = new ArrayList<>(eventType.getAnnotationElements());
+        remove(eventType, aes, Enabled.class);
         remove(eventType, aes, Threshold.class);
         remove(eventType, aes, Period.class);
-        remove(eventType, aes, Enabled.class);
         remove(eventType, aes, StackTrace.class);
         remove(eventType, aes, Cutoff.class);
         remove(eventType, aes, RateLimit.class);
