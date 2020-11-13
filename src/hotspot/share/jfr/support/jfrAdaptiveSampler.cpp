@@ -226,7 +226,7 @@ void AdaptiveSampler::recalculate_averages(const Window* current_window, Sampler
   if (!is_dummy) {
     _avg_output = exponentially_weighted_moving_average(samples, _budget_lookback_alpha, _avg_output);
   }
-  _samples_budget = fmax<double>(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
+  _samples_budget = fmax(new_params.sample_count - _avg_output, 0) * _budget_lookback_cnt;
   printf("=== avg samples: %f, samples: %f, prob: %f\n", _avg_output, samples, current_window->probability());
   _avg_input = _avg_input == 0 ? total_count : exponentially_weighted_moving_average(total_count, _window_lookback_alpha, static_cast<double>(_avg_input));
 
