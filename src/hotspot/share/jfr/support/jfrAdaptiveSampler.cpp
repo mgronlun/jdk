@@ -33,7 +33,6 @@
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/thread.inline.hpp"
 #include "utilities/globalDefinitions.hpp"
-#include <cmath>
 
 Window::Window(double probability, size_t samples_budget) :
     _start_ticks(_params.duration == -1 ? 0 : AdaptiveSampler::now()),
@@ -54,7 +53,7 @@ void Window::reinitialize(double probability, size_t samples_budget, SamplerWind
 }
 
 inline double compute_interval_alpha(size_t interval) {
-  return 1 - std::pow(interval, static_cast<double>(-1) / static_cast<double>(interval));
+  return 1 - pow(interval, static_cast<double>(-1) / static_cast<double>(interval));
 }
 
 AdaptiveSampler::AdaptiveSampler(size_t window_lookback_cnt, size_t budget_lookback_cnt) :
@@ -191,11 +190,11 @@ void AdaptiveSampler::rotate_window() {
 */
 
 inline double exponentially_weighted_moving_average(double Y, double alpha, double S) {
-  return std::isnan(S) ? Y : alpha * Y + (1 - alpha) * S;
+  return isnan(S) ? Y : alpha * Y + (1 - alpha) * S;
 }
 
 inline double derivative_exponentially_weighted_moving_average(double Y, double alpha, double S) {
-  return std::isnan(S) ? Y : S + alpha * (Y - S);
+  return isnan(S) ? Y : S + alpha * (Y - S);
 }
 
 void AdaptiveSampler::recalculate_averages(const Window* current_window, SamplerWindowParams new_params, EventRetiredSampleWindow& event) {

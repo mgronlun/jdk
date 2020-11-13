@@ -7,9 +7,6 @@
 // The include list should mirror the one found in the included source file -
 // with the ones that should pick up the mocks removed. Those should be included
 // later after the mocks have been defined.
-#include <cmath>
-#include <random>
-
 #include "jfr/jfrEvents.hpp"
 #include "jfr/utilities/jfrTimeConverter.hpp"
 #include "jfr/utilities/jfrTryLock.hpp"
@@ -18,7 +15,6 @@
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/thread.inline.hpp"
 #include "utilities/globalDefinitions.hpp"
-#include <cmath>
 
 #include "unittest.hpp"
 
