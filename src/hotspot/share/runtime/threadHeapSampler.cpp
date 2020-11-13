@@ -50,7 +50,10 @@ void ThreadHeapSampler::check_for_sampling(oop obj, size_t allocation_size, size
   // If not yet time for a sample, skip it.
   if (total_allocated_bytes < _bytes_until_sample) {
     _bytes_until_sample -= total_allocated_bytes;
+    return;
   }
+
+  JvmtiExport::sampled_object_alloc_event_collector(obj);
 
   size_t overflow_bytes = total_allocated_bytes - _bytes_until_sample;
   pick_next_sample(overflow_bytes);
