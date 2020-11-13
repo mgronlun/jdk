@@ -5,16 +5,8 @@
 
 class SamplerSupport : public CHeapObj<mtInternal> {
   private:
-  static bool _log_table_initialized;
-
-  // Statics for the fast log
-  static const int FastLogNumBits = 10;
-  static const int FastLogMask = (1 << FastLogNumBits) - 1;
-
-  static double _log_table[1<<FastLogNumBits];  // Constant
 
   static double fast_log2(const double& d);
-  static bool init_log_table();
   static uint64_t next_random(uint64_t rnd);
 
   uint64_t next_random();
@@ -31,7 +23,7 @@ class SamplerSupport : public CHeapObj<mtInternal> {
     }
   }
 
-  size_t pick_next_geometric_sample(size_t mean);
+  size_t next_random_geometric(size_t mean);
 
   double next_random_uniform();
 };

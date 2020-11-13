@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2020, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2018, Google and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -24,6 +24,8 @@
  */
 
 #include "precompiled.hpp"
+#include "logging/log.hpp"
+#include "logging/logTag.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -33,6 +35,11 @@
 volatile int ThreadHeapSampler::_sampling_interval = 512 * 1024;
 
 void ThreadHeapSampler::pick_next_sample(size_t overflowed_bytes) {
+#ifndef PRODUCT
+  if (!log_table_checked) {
+    verify_or_generate_log_table();
+  }
+#endif
   // Explicitly test if the sampling interval is 0, return 0 to sample every
   // allocation.
   int interval = get_sampling_interval();
@@ -41,7 +48,7 @@ void ThreadHeapSampler::pick_next_sample(size_t overflowed_bytes) {
     return;
   }
 
-  _bytes_until_sample = _sampler_support.pick_next_geometric_sample(interval);
+  _bytes_until_sample = _sampler_support.next_random_geometric(interval);
 }
 
 void ThreadHeapSampler::check_for_sampling(oop obj, size_t allocation_size, size_t bytes_since_allocation) {
