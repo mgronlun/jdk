@@ -276,22 +276,22 @@ static double log_table_value(int i) {
 static volatile bool log_table_checked = false;
 
 // Sanity check all log_table values or print it out if running
-// -Xlog:heapsampling+generate::none
+// -Xlog:sampling+generate::none
 static void verify_or_generate_log_table() {
   log_table_checked = true;
   assert(is_power_of_2(FastLogCount) && FastLogCount >= 4, "table size should be power of two and at least 4");
-  if (log_is_enabled(Info,heapsampling,generate)) {
-    log_info(heapsampling,generate)("FastLogCount = %d", FastLogCount);
-    log_info(heapsampling,generate)("static const double log_table[FastLogCount] = {");
+  if (log_is_enabled(Info,sampling,generate)) {
+    log_info(sampling,generate)("FastLogCount = %d", FastLogCount);
+    log_info(sampling,generate)("static const double log_table[FastLogCount] = {");
     int i = 0;
     for (; i < FastLogCount; i += 4) {
       double v1 = log_table_value(i);
       double v2 = log_table_value(i + 1);
       double v3 = log_table_value(i + 2);
       double v4 = log_table_value(i + 3);
-      log_info(heapsampling,generate)("  %.15f, %.15f, %.15f, %.15f,", v1, v2, v3, v4);
+      log_info(sampling,generate)("  %.15f, %.15f, %.15f, %.15f,", v1, v2, v3, v4);
     }
-    log_info(heapsampling,generate)("};");
+    log_info(sampling,generate)("};");
     assert(i == FastLogCount, "post-loop invariant");
   } else {
     // sanity check log_table - disabled when generating
