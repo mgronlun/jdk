@@ -24,8 +24,6 @@
  */
 
 #include "precompiled.hpp"
-#include "logging/log.hpp"
-#include "logging/logTag.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/sharedRuntime.hpp"
@@ -35,11 +33,6 @@
 volatile int ThreadHeapSampler::_sampling_interval = 512 * 1024;
 
 void ThreadHeapSampler::pick_next_sample(size_t overflowed_bytes) {
-#ifndef PRODUCT
-  if (!log_table_checked) {
-    verify_or_generate_log_table();
-  }
-#endif
   // Explicitly test if the sampling interval is 0, return 0 to sample every
   // allocation.
   int interval = get_sampling_interval();

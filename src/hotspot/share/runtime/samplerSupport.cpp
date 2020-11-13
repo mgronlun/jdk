@@ -1,4 +1,6 @@
 #include "precompiled.hpp"
+#include "logging/log.hpp"
+#include "logging/logTag.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/samplerSupport.hpp"
 
@@ -352,6 +354,11 @@ double SamplerSupport::fast_log2(const double& d) {
   uint64_t x = 0;
   assert(sizeof(d) == sizeof(x),
          "double and uint64_t do not have the same size");
+#ifndef PRODUCT
+  if (!log_table_checked) {
+    verify_or_generate_log_table();
+  }
+#endif
   x = *reinterpret_cast<const uint64_t*>(&d);
   const uint32_t x_high = x >> 32;
   assert(FastLogNumBits <= 20, "FastLogNumBits should be less than 20.");
@@ -372,11 +379,6 @@ double SamplerSupport::fast_log2(const double& d) {
 // log_2(q) * (-log_e(2) * 1/m) = x
 // In the code, q is actually in the range 1 to 2**26, hence the -26 below
 size_t SamplerSupport::next_random_geometric(size_t mean) {
-#ifndef PRODUCT
-  if (!log_table_checked) {
-    verify_or_generate_log_table();
-  }
-#endif
   _rnd = next_random(_rnd);
   // Take the top 26 bits as the random number
   // (This plus a 1<<58 sampling bound gives a max possible step of
