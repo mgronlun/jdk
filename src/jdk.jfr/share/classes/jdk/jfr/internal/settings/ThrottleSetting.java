@@ -40,29 +40,33 @@ import jdk.jfr.internal.Type;
 import jdk.jfr.internal.Utils;
 
 @MetadataDefinition
-@Label("Event Emmission Rate Limit")
-@Description("Event emissions rate (events per second) limit")
-@Name(Type.SETTINGS_PREFIX + "RateLimit")
-public final class RateLimitSetting extends JDKSettingControl {
-    private final static Pattern NUMBER_PTN = Pattern.compile("([0-9]+)");
-    private final static long typeId = Type.getTypeId(RateLimitSetting.class);
+@Label("Event Emmission Throttle")
+@Description("Event emissions throttle (events per second)")
+@Name(Type.SETTINGS_PREFIX + "Throttle")
+public final class ThrottleSetting extends JDKSettingControl {
+    private final static long typeId = Type.getTypeId(ThrottleSetting.class);
+    private static final String OFF = "off";
 
     private String value = "0";
     private final PlatformEventType eventType;
 
-    public RateLimitSetting(PlatformEventType eventType) {
+    public ThrottleSetting(PlatformEventType eventType) {
        this.eventType = Objects.requireNonNull(eventType);
     }
 
     @Override
     public String combine(Set<String> values) {
-        long min = Long.MAX_VALUE;
+        long max = 0;
         String text = "0";
         for (String value : values) {
             long l = parseValueSafe(value);
-            if (l < min) {
+            if (l == 0) {
+                // throttling is disabled, accept everything
+                return "0";
+            }
+            if (l > max) {
                 text = value;
-                min = l;
+                max = l;
             }
         }
         return text;
@@ -70,9 +74,10 @@ public final class RateLimitSetting extends JDKSettingControl {
 
     @Override
     public void setValue(String value) {
+        System.out.println("SetValue: " + value);
         long l =  parseValueSafe(value);
         this.value = value;
-        eventType.setRateLimit(l);
+        eventType.setThrottle(l);
     }
 
     @Override
@@ -81,22 +86,32 @@ public final class RateLimitSetting extends JDKSettingControl {
     }
 
     public static boolean isType(long typeId) {
-        return RateLimitSetting.typeId == typeId;
+        return ThrottleSetting.typeId == typeId;
     }
 
     public static long parseValueSafe(String value) {
-        if (value == null) {
-            return 0L;
-        }
+        long result = -1L;
         try {
-            Matcher matcher = NUMBER_PTN.matcher(value);
-            if (matcher.find()) {
-                return Long.valueOf(matcher.group(1));
-            } else {
-                return 0L;
-            }
+            result = Utils.parseThrottleValue(value);
         } catch (NumberFormatException nfe) {
-            return 0L;
+            return -1L;
         }
+        return result;
+    }
+    private static boolean isDisabled(String value) {
+        return OFF.equals(value.trim().toLowerCase());
+    }
+
+    private static boolean isRate(String value) {
+        // Expected input format is "x / y" or "x \ y" where x is a non-negative integer and
+        // y is a time unit. Split the string at the delimiter.
+        String[] result = value.split("[\\/\\\\]");
+        return result.length == 2;
+    }
+    private static boolean isProbability(String value) {
+        // Expected input format is "x %" or "0.x" where x is a non-negative integer and
+        // y is a time unit. Split the string at the delimiter.
+        String[] result = value.split("[\\/\\\\]");
+        return result.length == 2;
     }
 }

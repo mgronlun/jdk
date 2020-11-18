@@ -48,9 +48,9 @@ import jdk.jfr.internal.EventInstrumentation.SettingInfo;
 import jdk.jfr.internal.settings.CutoffSetting;
 import jdk.jfr.internal.settings.EnabledSetting;
 import jdk.jfr.internal.settings.PeriodSetting;
-import jdk.jfr.internal.settings.RateLimitSetting;
 import jdk.jfr.internal.settings.StackTraceSetting;
 import jdk.jfr.internal.settings.ThresholdSetting;
+import jdk.jfr.internal.settings.ThrottleSetting;
 
 // This class can't have a hard reference from PlatformEventType, since it
 // holds SettingControl instances that need to be released
@@ -70,7 +70,7 @@ public final class EventControl {
     private static final Type TYPE_STACK_TRACE = TypeLibrary.createType(StackTraceSetting.class);
     private static final Type TYPE_PERIOD = TypeLibrary.createType(PeriodSetting.class);
     private static final Type TYPE_CUTOFF = TypeLibrary.createType(CutoffSetting.class);
-    private static final Type TYPE_RATELIMIT = TypeLibrary.createType(RateLimitSetting.class);
+    private static final Type TYPE_THROTTLE = TypeLibrary.createType(ThrottleSetting.class);
 
     private final ArrayList<SettingInfo> settingInfos = new ArrayList<>();
     private final ArrayList<NamedControl> namedControls = new ArrayList<>(5);
@@ -90,8 +90,8 @@ public final class EventControl {
         if (eventType.hasCutoff()) {
             addControl(Cutoff.NAME, defineCutoff(eventType));
         }
-        if (eventType.hasRateLimit()) {
-            addControl(RateLimit.NAME, defineRateLimit(eventType));
+        if (eventType.hasThrottle()) {
+            addControl(Throttle.NAME, defineThrottle(eventType));
         }
 
         addControl(Enabled.NAME, defineEnabled(eventType));
@@ -102,7 +102,7 @@ public final class EventControl {
         remove(eventType, aes, Period.class);
         remove(eventType, aes, StackTrace.class);
         remove(eventType, aes, Cutoff.class);
-        remove(eventType, aes, RateLimit.class);
+        remove(eventType, aes, Throttle.class);
         aes.trimToSize();
         eventType.setAnnotations(aes);
         this.type = eventType;
@@ -259,14 +259,14 @@ public final class EventControl {
         return new Control(new CutoffSetting(type), def);
     }
 
-    private static Control defineRateLimit(PlatformEventType type) {
-        RateLimit limit = type.getAnnotation(RateLimit.class);
-        int def = RateLimit.DEFAULT;
-        if (limit != null) {
-            def = limit.value();
+    private static Control defineThrottle(PlatformEventType type) {
+        Throttle throttle = type.getAnnotation(Throttle.class);
+        String def = Throttle.DEFAULT;
+        if (throttle != null) {
+            def = throttle.value();
         }
-        type.add(PrivateAccess.getInstance().newSettingDescriptor(TYPE_RATELIMIT, RateLimit.NAME, Integer.toString(def), Collections.emptyList()));
-        return new Control(new RateLimitSetting(type), Integer.toString(def));
+        type.add(PrivateAccess.getInstance().newSettingDescriptor(TYPE_THROTTLE, Throttle.NAME, def, Collections.emptyList()));
+        return new Control(new ThrottleSetting(type), def);
     }
 
     private static Control definePeriod(PlatformEventType type) {

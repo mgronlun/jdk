@@ -176,8 +176,8 @@ NO_TRANSITION(jboolean, jfr_set_cutoff(JNIEnv* env, jobject jvm, jlong event_typ
   return JfrEventSetting::set_cutoff(event_type_id, cutoff_ticks) ? JNI_TRUE : JNI_FALSE;
 NO_TRANSITION_END
 
-NO_TRANSITION(jboolean, jfr_set_ratelimit(JNIEnv* env, jobject jvm, jlong event_type_id, jlong rate_limit))
-  return JfrEventThrottler::for_event(static_cast<JfrEventId>(event_type_id))->set_ratelimit(rate_limit) ? JNI_TRUE : JNI_FALSE;
+NO_TRANSITION(jboolean, jfr_set_throttle(JNIEnv* env, jobject jvm, jlong event_type_id, jlong throttle))
+  return JfrEventThrottler::for_event(static_cast<JfrEventId>(event_type_id))->configure(100, -1.0, -1) ? JNI_TRUE : JNI_FALSE;
 NO_TRANSITION_END
 
 NO_TRANSITION(jboolean, jfr_should_rotate_disk(JNIEnv* env, jobject jvm))

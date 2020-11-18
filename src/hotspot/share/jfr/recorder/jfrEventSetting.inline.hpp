@@ -51,7 +51,4 @@ inline bool JfrEventSetting::is_large(JfrEventId event_id) {
   return setting(event_id).large != 0;
 }
 
-inline int64_t JfrEventSetting::ratelimit(JfrEventId event_id) {
-  return setting(event_id).ratelimit;
-}
 #endif // SHARE_JFR_RECORDER_JFREVENTSETTING_INLINE_HPP

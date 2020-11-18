@@ -47,8 +47,6 @@ class JfrEventSetting : AllStatic {
   static int64_t cutoff(JfrEventId event_id);
   static bool is_large(JfrEventId event_id);
   static void set_large(JfrEventId event_id);
-  static bool set_ratelimit(int64_t event_id, int64_t ratelimit);
-  static int64_t ratelimit(JfrEventId event_id);
 
   DEBUG_ONLY(static bool bounds_check_event(int64_t id);)
 };

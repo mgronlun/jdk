@@ -34,7 +34,7 @@ import java.lang.annotation.Target;
 import jdk.jfr.MetadataDefinition;
 
 /**
- * Event annotation, determines the event emission rate limit in event per second.
+ * Event annotation, determines the event emission throttle in event per second.
  *
  * This settings is only supported for JVM events.
  *
@@ -44,16 +44,16 @@ import jdk.jfr.MetadataDefinition;
 @Target({ ElementType.TYPE })
 @Inherited
 @Retention(RetentionPolicy.RUNTIME)
-public @interface RateLimit {
+public @interface Throttle {
     /**
-     * Settings name {@code "ratelimit"} for configuring event rate limit.
+     * Settings name {@code "throttle"} for configuring event throttle.
      */
-    public final static String NAME = "rateLimit";
-    public final static int DEFAULT = 100;
+    public final static String NAME = "throttle";
+    public final static String DEFAULT = "100";
 
     /**
-     * The event emission rate limit.
-     * When 0 or a negative number is specified the rate limit will be disregarded.
+     * The event emission throttle.
+     * When "off" is specified the throttle will be disregarded.
      */
-    int value() default DEFAULT;
+    String value() default DEFAULT;
 }

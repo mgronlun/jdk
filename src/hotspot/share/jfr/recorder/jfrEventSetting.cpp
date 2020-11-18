@@ -58,13 +58,6 @@ void JfrEventSetting::set_large(JfrEventId event_id) {
   setting(event_id).large = true;
 }
 
-bool JfrEventSetting::set_ratelimit(int64_t id, int64_t ratelimit) {
-  JfrEventId event_id = (JfrEventId)id;
-  assert(bounds_check_event(event_id), "invariant");
-  setting(event_id).ratelimit = ratelimit;
-  return true;
-}
-
 #ifdef ASSERT
 bool JfrEventSetting::bounds_check_event(int64_t id) {
   if ((unsigned)id < FIRST_EVENT_ID) {

@@ -516,7 +516,18 @@ public final class JVM {
      */
     public native boolean setCutoff(long eventTypeId, long cutoffTicks);
 
-    public native boolean setRateLimit(long eventTypeId, long rateLimit);
+    /**
+     * Sets throttle for event.
+     *
+     * Determines how events are throttled.
+     *
+     * Long.MAXIMUM_VALUE = no limit
+     *
+     * @param eventTypeId the id of the event type
+     * @param throttle in ms,
+     * @return true, if it could be set
+     */
+    public native boolean setThrottle(long eventTypeId, long throttle);
 
     /**
      * Emit old object sample events.

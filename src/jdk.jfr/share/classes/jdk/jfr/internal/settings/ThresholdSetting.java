@@ -72,6 +72,7 @@ public final class ThresholdSetting extends JDKSettingControl {
 
     @Override
     public void setValue(String value) {
+        System.out.println("Threshold value: " + value);
         long l = Utils.parseTimespanWithInfinity(value);
         this.value = value;
         eventType.setThreshold(l);

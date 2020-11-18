@@ -59,7 +59,7 @@ public final class PlatformEventType extends Type {
     private boolean hasDuration = true;
     private boolean hasPeriod = true;
     private boolean hasCutoff = false;
-    private boolean hasRateLimit = false;
+    private boolean hasThrottle = false;
     private boolean isInstrumented;
     private boolean markForInstrumentation;
     private boolean registered = true;
@@ -143,8 +143,8 @@ public final class PlatformEventType extends Type {
        this.hasCutoff = hasCutoff;
     }
 
-    public void setHasRateLimit(boolean hasRateLimit) {
-        this.hasRateLimit = hasRateLimit;
+    public void setHasThrottle(boolean hasThrottle) {
+        this.hasThrottle= hasThrottle;
     }
 
     public void setCutoff(long cutoffNanos) {
@@ -154,9 +154,10 @@ public final class PlatformEventType extends Type {
         }
     }
 
-    public void setRateLimit(long rateLimit) {
+    public void setThrottle(long throttle) {
         if (isJVM) {
-            JVM.getJVM().setRateLimit(getId(), rateLimit);
+            System.out.println("JVM.setThrottle: " + throttle);
+            JVM.getJVM().setThrottle(getId(), throttle);
         }
     }
 
@@ -180,8 +181,8 @@ public final class PlatformEventType extends Type {
         return this.hasCutoff;
     }
 
-    public boolean hasRateLimit() {
-        return this.hasRateLimit;
+    public boolean hasThrottle() {
+        return this.hasThrottle;
     }
 
     public boolean isEnabled() {
@@ -229,6 +230,7 @@ public final class PlatformEventType extends Type {
     public void setThreshold(long thresholdNanos) {
         this.thresholdTicks = Utils.nanosToTicks(thresholdNanos);
         if (isJVM) {
+            System.out.println("Threshold: " + getId() + " value: " + thresholdTicks);
             JVM.getJVM().setThreshold(getId(), thresholdTicks);
         }
     }

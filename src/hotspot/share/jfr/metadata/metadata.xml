@@ -615,7 +615,7 @@
   </Event>
 
   <Event name="ObjectAllocationSample" category="Java Application" label="Allocation sample" description="Allocation sample"
-    thread="true" stackTrace="true" startTime="false" rateLimit="true">
+    thread="true" stackTrace="true" startTime="false" throttle="true">
     <Field type="Class" name="objectClass" label="Object Class" description="Class of allocated object" />
     <Field type="ulong" contentType="bytes" name="allocationSize" label="Allocation Size" />
     <Field type="ulong" contentType="bytes" name="allocatedSinceLast" label="Allocated since last sample"/>

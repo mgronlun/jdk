@@ -26,6 +26,7 @@
 #include "jfr/recorder/jfrEventSetting.inline.hpp"
 #include "jfr/recorder/service/jfrEventThrottler.hpp"
 #include "jfr/utilities/jfrAllocation.hpp"
+#include "runtime/semaphore.inline.hpp"
 
  /*
   * This is an associative array.
@@ -58,23 +59,60 @@ class JfrEventThrottlerMap : public JfrCHeapObj {
   }
 };
 
-static const JfrSamplerParams _disabled_params = { 0, 0, 0 };
-static const size_t default_window_duration_ms = 200;
-static const size_t window_lookback_count = 25;
+class JfrEventThrottlerSettingsLocker : public StackObj {
+ private:
+  Semaphore* const _semaphore;
+ public:
+  JfrEventThrottlerSettingsLocker(JfrEventThrottler* throttler) : _semaphore(throttler->_semaphore) {
+    assert(_semaphore != NULL, "invariant");
+    _semaphore->wait();
+  }
+  ~JfrEventThrottlerSettingsLocker() {
+    _semaphore->signal();
+  }
+};
+
+static const JfrSamplerParams _disabled_params = {
+                                                   JfrSamplerParams::unused,
+                                                   JfrSamplerParams::unused,
+                                                   JfrSamplerParams::unused,
+                                                   0,
+                                                   0,
+                                                   false
+                                                 };
 
 JfrEventThrottler::JfrEventThrottler(JfrEventId event_id) :
-  JfrAdaptiveSampler(window_lookback_count),
+  JfrAdaptiveSampler(),
+  _semaphore(NULL),
   _event_id(event_id),
   _last_params(_disabled_params),
-  _last_rate_limit_per_second(0) {}
+  _disabled(false),
+  _update(false) {}
 
-bool JfrEventThrottler::initialize() {
-  return JfrAdaptiveSampler::initialize();
+JfrEventThrottler::~JfrEventThrottler() {
+  delete _semaphore;
 }
 
-bool JfrEventThrottler::set_ratelimit(int64_t rate_limit) {
-  JfrEventSetting::set_ratelimit(_event_id, rate_limit);
-  reset();
+bool JfrEventThrottler::initialize() {
+  _semaphore = new Semaphore(1);
+  return _semaphore != NULL && JfrAdaptiveSampler::initialize();
+}
+
+/*
+ * The event throttler can be configured in three dimensions (all optional):
+ *
+ * - rate per second  throttle dynamically to maintain a continuous, maximal rate per second
+ * - probability      throttle using a probability
+ * - nth selection    throttle by selecting every nth sample point
+ *
+ * If a rate is specified, the probability and / or nth selection becomes relative to the rate.
+ */
+bool JfrEventThrottler::configure(intptr_t rate_per_second, double probability, intptr_t nth_selection) {
+  JfrEventThrottlerSettingsLocker sl(this);
+  _rate_per_second = rate_per_second;
+  _probability = probability;
+  _nth_selection = nth_selection;
+  _update = true;
   return true;
 }
 
@@ -97,84 +135,86 @@ JfrEventThrottler* JfrEventThrottler::for_event(JfrEventId event_id) {
 }
 
 bool JfrEventThrottler::accept(JfrEventId event_id, int64_t timestamp) {
-  if (JfrEventSetting::ratelimit(event_id) == 0) {
-    return true;
-  }
   JfrEventThrottler* const throttler = for_event(event_id);
-  return throttler != NULL ? throttler->sample(timestamp) : true;
+  assert(throttler != NULL, "invariant");
+  return throttler->sample(timestamp);
+  //return throttler->_disabled ? true : throttler->sample(timestamp);
 }
+
+const intptr_t event_throttler_disabled = -2;
+static const size_t default_window_duration_ms = 200;   // 5 windows per second
 
 /*
  * Rates lower than or equal to the 'low rate upper bound', are considered special.
- * They will use a window with duration one second, because the rates are so low they
- * do not justify the overhead of more frequent context switching of windows.
+ * They will use a window of duration one second, because the rates are so low they
+ * do not justify the overhead of more frequent window rotations.
  */
 static const size_t low_rate_upper_bound = 9;
 
-inline void samples_per_window(JfrSamplerParams& params, uint64_t rate_limit_per_second, const JfrSamplerWindow* expired) {
-  assert(rate_limit_per_second > 0, "invariant");
+/*
+ * Breaks down an overall rate per second to a number of sample points per window.
+ */
+inline void set_sample_points_per_window(JfrSamplerParams& params, int64_t rate_per_second, const JfrSamplerWindow* expired) {
+  assert(rate_per_second != event_throttler_disabled, "invariant");
   assert(expired != NULL, "invariant");
-  if (rate_limit_per_second <= low_rate_upper_bound) {
-    params.sample_points_per_window = rate_limit_per_second;
+  if (rate_per_second <= low_rate_upper_bound) {
+    params.sample_points_per_window = rate_per_second;
     return;
   }
-  // Window duration is in milliseconds and the rate_limit is in samples per second.
-  const double rate_limit_per_ms = static_cast<double>(rate_limit_per_second) / static_cast<double>(MILLIUNITS);
-  params.sample_points_per_window = floor(rate_limit_per_ms * default_window_duration_ms);
-}
-
-inline void window_duration(JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  assert(params.sample_points_per_window > 0, "invariant");
-  if (params.sample_points_per_window <= low_rate_upper_bound) {
-    params.window_duration_ms = MILLIUNITS; // 1 second
-    return;
-  }
-  params.window_duration_ms = default_window_duration_ms;
+  // Window duration is in milliseconds and the rate_is in sample points per second.
+  const double rate_per_ms = static_cast<double>(rate_per_second) / static_cast<double>(MILLIUNITS);
+  params.sample_points_per_window = floor(rate_per_ms * default_window_duration_ms);
 }
 
 /*
- * This parameter controls how fast 'accumulated debt' should be amortized.
- * Debt can be thought of as a cumulative error term, and is indicative for how much the sampler
- * is deviating from a set point. Due to the adaptive nature of the sampler, debt accumulates naturally
- * over time, as a function of under-and/or oversampled windows, because of system fluctuations.
- * This parameter controls how fast to catch up / slow down, with the rate given in number of windows.
- * The default is one window, meaning the sampler should attempt to amortize an accumulated debt immediately
- * in the next window, if possible. A low amoritization count will on average keep the sampler
- * closer to the set point. A potential downside with a low amortization count is that some randomness
- * might be sacrificed in the process of having the sampler catch up more quickly.
+ * The window_lookback_count states the history in number of windows to take into account
+ * when the JfrAdaptiveSampler engine is calcualting an expected weigthed moving average (EWMA).
+ * It only applies to contexts where a rate is specified. Technically, it determines the alpha
+ * coefficient in an EMWA formula.
  */
-static const uint64_t default_amortization_count = 1;
+static const size_t default_window_lookback_count = 25; // 25 windows == 5 seconds (for default window duration)
 
-inline void amortization(JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  params.amortization_window_count = default_amortization_count;
+inline void set_window_duration(JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+  if (params.sample_points_per_window != JfrSamplerParams::unused && params.sample_points_per_window > low_rate_upper_bound) {
+    params.window_duration_ms = default_window_duration_ms;
+    params.window_lookback_count = default_window_lookback_count; // 5 seconds
+    return;
+  }
+  // Lower rates.
+  params.window_duration_ms = MILLIUNITS; // 1 second
+  params.window_lookback_count = 5; // 5 windows == 5 seconds
 }
 
-const JfrSamplerParams& JfrEventThrottler::last_params(int64_t rate_limit_per_second, const JfrSamplerWindow* expired) {
-  samples_per_window(_last_params, rate_limit_per_second, expired);
-  window_duration(_last_params, expired);
-  amortization(_last_params, expired);
-  _last_rate_limit_per_second = rate_limit_per_second;
+const JfrSamplerParams& JfrEventThrottler::last_params(const JfrSamplerWindow* expired) {
+  JfrEventThrottlerSettingsLocker sl(this);
+  if (event_throttler_disabled == _rate_per_second) {
+    // The event throttler is "off".
+    _disabled = true;
+    return _disabled_params;
+  }
+  _last_params.probability = _probability;
+  _last_params.nth_selection = _nth_selection;
+  set_sample_points_per_window(_last_params, _rate_per_second, expired);
+  set_window_duration(_last_params, expired);
+  _last_params.reconfigure = true;
+  _update = false;
   return _last_params;
 }
 
 /*
- * This function is the control mechanism for the JfrAdaptiveSampler engine.
- * The engine calls this function when a sampler window has expired, providing the
+ * This is the feedback control loop when using the JfrAdaptiveSampler engine.
+ *
+ * The engine calls this when a sampler window has expired, providing the
  * client with an opportunity to perform some analysis. To reciprocate, the client
- * returns an updated set of parameters for the engine to apply to the next window.
+ * returns a set of parameters, possibly updated, for the engine to apply to the next window.
  *
  * Try to keep relatively quick, since the engine is currently inside a critical section,
- * in the process of context switching windows.
+ * in the process of rotating windows.
  */
 const JfrSamplerParams& JfrEventThrottler::next_window_params(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
-  const int64_t rate_limit_per_second = JfrEventSetting::ratelimit(_event_id);
-  if (rate_limit_per_second == 0) {
-    return _disabled_params;
+  if (_update) {
+    return last_params(expired); // Updates _last_params in-place.
   }
-  if (rate_limit_per_second == _last_rate_limit_per_second) {
-    return _last_params;
-  }
-  // last_params() modifies _last_params in-place
-  return last_params(rate_limit_per_second, expired);
+  return _disabled ? _disabled_params : _last_params;
 }
