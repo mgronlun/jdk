@@ -70,13 +70,13 @@
  */
 
 struct JfrSamplerParams {
-  int64_t sample_points_per_window; // denotes a rate, i.e. the number of sample points to attempt to select per window (optional)
-  double probability; // the probability of selection (optional)
-  int64_t nth_selection; // the "nth selection" interval (optional)
+  intptr_t sample_points_per_window;  // denotes a rate, i.e. the number of sample points to attempt to select per window (optional)
+  double probability;                 // the probability of selection (optional)
+  intptr_t nth_selection;             // the "nth selection" interval (optional)
   size_t window_duration_ms;
-  size_t window_lookback_count; // the EMWA alpha coefficient determines the history for calcualting a moving average, for rates only
-  mutable bool reconfigure; // the sampler should issue a reconfiguration because some options have changed
-  static const int64_t unused = -1;
+  size_t window_lookback_count;       // the EMWA alpha coefficient determines the history for calcualting a moving average, applies to rates only
+  mutable bool reconfigure;           // the sampler should issue a reconfiguration because some parameter changed
+  static const intptr_t unused = -1;  // marks a parameter as not in-use
 };
 
 class JfrAdaptiveSampler;
@@ -90,8 +90,8 @@ class JfrSamplerWindow : public JfrCHeapObj {
   size_t _sampling_interval;
   size_t _projected_sample_size;
   size_t _projected_population_size;
+
  protected:
-  mutable volatile size_t _measured_sample_size;
   mutable volatile size_t _measured_population_size;
   JfrSamplerWindow();
   void initialize(const JfrSamplerParams& params, size_t initial_value);
@@ -99,7 +99,6 @@ class JfrSamplerWindow : public JfrCHeapObj {
   virtual bool is_derived() const;
   bool is_expired(int64_t timestamp) const;
   size_t max_sample_size() const;
-  size_t measured_sample_size() const;
   bool sample(int64_t timestamp, bool* is_expired) const;
   virtual bool sample() const;
 
@@ -116,7 +115,6 @@ class JfrSamplerWindow : public JfrCHeapObj {
 class EventSamplerWindow;
 
 class JfrAdaptiveSampler : public JfrCHeapObj {
-  friend class JfrSamplerWindow;
  private:
   JfrSamplerWindow* _window_0;
   JfrSamplerWindow* _window_1;
@@ -127,34 +125,36 @@ class JfrAdaptiveSampler : public JfrCHeapObj {
   double _ewma_population_size_alpha;
   size_t _acc_debt_carry_limit;
   size_t _acc_debt_carry_count;
-  size_t _initial_value_for_next_window;
+  size_t _next_window_initializer;
   volatile int _lock;
-  bool _probability_mode;
 
   void debug(const JfrSamplerWindow* expired, double avg_population_size) const;
   void fill(EventSamplerWindow& event, const JfrSamplerWindow* expired);
 
-  size_t next_window_amortization(const JfrSamplerWindow* expired);
-  size_t next_window_sample_size(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-
-  // Recalculated values are set directly onto the next window to be installed.
-  void set_rate(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-  void set_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-  void set_probability(const JfrSamplerParams& params, size_t projected_sample_size, const JfrSamplerWindow* expired);
-  void set_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-  void set_rate_and_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-  void set_rate_and_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-  void set_probability_and_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-  void set_projected_population_size(size_t projected_sample_size, JfrSamplerWindow* next);
-  void set_all(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
-
+  // Windows
   void rotate_window(int64_t timestamp);
   void rotate(const JfrSamplerWindow* expired);
   const JfrSamplerWindow* active_window() const;
-  JfrSamplerWindow* next_window(const JfrSamplerWindow* expired) const;
+  JfrSamplerWindow* next_window(const JfrSamplerWindow* expired, bool probability = false) const;
   void reset_next_window(const JfrSamplerWindow* expired);
+  size_t next_window_amortization(const JfrSamplerWindow* expired);
   void install(const JfrSamplerWindow* next_window);
+
+  // Properties are set directly onto the next window, returned and ready for installation.
+  JfrSamplerWindow* set_rate(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
+  JfrSamplerWindow* set_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
+  JfrSamplerWindow* set_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool randomize);
+  JfrSamplerWindow* set_rate_and_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
+  JfrSamplerWindow* set_rate_and_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool randomize);
+  JfrSamplerWindow* set_projected_population_size(size_t projected_sample_size, JfrSamplerWindow* next);
+  JfrSamplerWindow* set_projected_sample_size(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool probability = false);
+
+  // Configuration
+  u1 configure_rate(const JfrSamplerParams& params);
+  u1 configure_probability(const JfrSamplerParams& params, bool* randomize_nth_selection) const;
   const JfrSamplerWindow* configure(const JfrSamplerParams& params, const JfrSamplerWindow* expired);
+  u1 configure(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool* randomize_nth_selection);
+  bool transform_probability_to_nth_selection(JfrSamplerParams& params, bool* randomize_nth_selection) const;
 
  protected:
   JfrAdaptiveSampler();

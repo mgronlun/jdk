@@ -524,10 +524,12 @@ public final class JVM {
      * Long.MAXIMUM_VALUE = no limit
      *
      * @param eventTypeId the id of the event type
-     * @param throttle in ms,
+     * @param rate events per second
+     * @param probability sample probability
+     * @param nthSelection sample every nth
      * @return true, if it could be set
      */
-    public native boolean setThrottle(long eventTypeId, long throttle);
+    public native boolean setThrottle(long eventTypeId, int rate, double probability, int nthSelection);
 
     /**
      * Emit old object sample events.

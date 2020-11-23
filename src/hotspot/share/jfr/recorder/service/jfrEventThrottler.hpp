@@ -35,15 +35,17 @@ class JfrEventThrottler : public JfrAdaptiveSampler {
   friend class JfrRecorderService;
   friend class JfrEventThrottlerSettingsLocker;
  private:
-  Semaphore* _semaphore;
-  JfrEventId _event_id;
   JfrSamplerParams _last_params;
-  size_t _rate_per_second;
+  Semaphore* _semaphore;
   double _probability;
-  size_t _nth_selection;
+  intptr_t _rate_per_second;
+  intptr_t _nth_selection;
+  JfrEventId _event_id;
   bool _disabled;
   bool _update;
-  const JfrSamplerParams& last_params(const JfrSamplerWindow* expired);
+
+  const JfrSamplerParams& update_params(const JfrSamplerWindow* expired);
+
   static bool create();
   static void destroy();
   static void clear();

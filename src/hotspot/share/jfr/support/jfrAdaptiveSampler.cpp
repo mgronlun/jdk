@@ -37,16 +37,15 @@ constexpr const double MAX_PROBABILITY = 1.0;
 constexpr const size_t MAX_SIZE_T = static_cast<size_t>(-1);
 
 inline double next_random_uniform() {
-  return Thread::current()->jfr_thread_local()->sampler_support()->next_random_uniform();
+  return Thread::current()->jfr_thread_local()->next_random_uniform();
 }
 
-class JfrProbabilityWindow : public JfrSamplerWindow {
+class JfrProbabilitySamplerWindow : public JfrSamplerWindow {
   friend class JfrAdaptiveSampler;
  private:
   double _probability;
-  size_t _max_sample_size;
 
-  JfrProbabilityWindow() : JfrSamplerWindow(), _probability(MAX_PROBABILITY), _max_sample_size(0) {}
+  JfrProbabilitySamplerWindow() : JfrSamplerWindow(), _probability(MAX_PROBABILITY) {}
 
   void reset() override {
     _probability = MAX_PROBABILITY;
@@ -68,30 +67,32 @@ class JfrProbabilityWindow : public JfrSamplerWindow {
   }
 
   /*
-   * A Bernoulli trial assigns a single uniformly distributed random number
-   * in the interval [0,1] to the continuous random variable X. The probability
-   * value assigned to the window is the p value of the trial,
-   * i.e. the probability of success.
+   * For continuous probabilities, the decision to sample
+   * is a function of a Bernoulli trial, where the continuous
+   * random variable X takes a uniformly distributed value
+   * in the interval [0,1]. The probability value assigned
+   * to the window is the p value of the trial, i.e. the
+   * probability of success. If a rate is specified, then
+   * the attempt must also be below the sample size maximum.
    *
-   *  If X < p, the outcome is successful.
+   * If X < p, the trial outcome is successful.
    */
   bool sample() const override {
     const double p = probability();
     if (p == MAX_PROBABILITY) return true;
-    if (measured_sample_size() >= _max_sample_size) {
-      return false;
-    }
-    if (next_random_uniform() >= p) {
+    const size_t max = max_sample_size();
+    if (population_size() > max || next_random_uniform() >= p) {
       // Event did not occur.
       return false;
     }
-    return Atomic::add(&_measured_sample_size, static_cast<size_t>(1)) <= _max_sample_size;
+    return Atomic::add(&_measured_population_size, static_cast<size_t>(1)) <= max;
   }
 
  public:
   size_t sample_size() const override {
-    const size_t measured_size = measured_sample_size();
-    return measured_size < _max_sample_size ? measured_size : _max_sample_size;
+    const size_t size = population_size();
+    const size_t max_size = max_sample_size();
+    return size < max_size ? size : max_size;
   }
 };
 
@@ -110,21 +111,18 @@ JfrSamplerWindow::JfrSamplerWindow() :
   _sampling_interval(1),
   _projected_sample_size(0),
   _projected_population_size(0),
-  _measured_sample_size(0),
   _measured_population_size(0) {
-  _params.sample_points_per_window = 0;
   _params.probability = JfrSamplerParams::unused;
   _params.nth_selection = JfrSamplerParams::unused;
 }
 
-void JfrSamplerWindow::initialize(const JfrSamplerParams& params, size_t initial_value) {
+void JfrSamplerWindow::initialize(const JfrSamplerParams& params, size_t initializer) {
   _params = params;
   if (params.window_duration_ms == 0) {
     Atomic::store(&_end_ticks, static_cast<int64_t>(0));
     return;
   }
-  Atomic::store(&_measured_sample_size, static_cast<size_t>(0));
-  Atomic::store(&_measured_population_size, initial_value);
+  Atomic::store(&_measured_population_size, initializer);
   const int64_t end_ticks = now() + millis_to_countertime(params.window_duration_ms);
   Atomic::store(&_end_ticks, end_ticks);
 }
@@ -136,25 +134,17 @@ void JfrSamplerWindow::reset() {
   _projected_population_size = MAX_SIZE_T;
 }
 
-inline bool JfrSamplerWindow::is_derived() const {
-  return false;
-}
-
-size_t JfrSamplerWindow::population_size() const {
+inline size_t JfrSamplerWindow::population_size() const {
   return Atomic::load(&_measured_population_size);
 }
 
-size_t JfrSamplerWindow::measured_sample_size() const {
-  return Atomic::load(&_measured_sample_size);
-}
-
-size_t JfrSamplerWindow::max_sample_size() const {
+inline size_t JfrSamplerWindow::max_sample_size() const {
   return _projected_sample_size;
 }
 
+// For nth selections, representing discrete probabilities,
+// the sample size is derived from the measured population size.
 size_t JfrSamplerWindow::sample_size() const {
-  // For nth selection and discrete probabilities, the sample size
-  // is derived from the measured population size.
   const size_t size = population_size();
   if (size > _projected_population_size) {
     return max_sample_size();
@@ -162,15 +152,10 @@ size_t JfrSamplerWindow::sample_size() const {
   if (size == 0 || size < _nth_mod_value) {
     return 0;
   }
-  return _nth_mod_value == 0 ? size / _sampling_interval : ((size - _nth_mod_value) / _sampling_interval) + 1;
-}
-
-intptr_t JfrSamplerWindow::debt() const {
-  return static_cast<intptr_t>(sample_size() - _params.sample_points_per_window);
-}
-
-intptr_t JfrSamplerWindow::accumulated_debt() const {
-  return static_cast<intptr_t>(_params.sample_points_per_window - max_sample_size()) + debt();
+  if (_nth_mod_value == 0) {
+    return size / _sampling_interval;
+  }
+  return ((size - _nth_mod_value) / _sampling_interval) + 1;
 }
 
 JfrAdaptiveSampler::JfrAdaptiveSampler() :
@@ -183,9 +168,8 @@ JfrAdaptiveSampler::JfrAdaptiveSampler() :
   _ewma_population_size_alpha(0),
   _acc_debt_carry_limit(0),
   _acc_debt_carry_count(0),
-  _initial_value_for_next_window(0),
-  _lock(0),
-  _probability_mode(false) {}
+  _next_window_initializer(0),
+  _lock(0) {}
 
 JfrAdaptiveSampler::~JfrAdaptiveSampler() {
   delete _window_0;
@@ -207,17 +191,41 @@ bool JfrAdaptiveSampler::initialize() {
   }
   // Specialized windows for handling continuous probabilities
   assert(_window_2 == NULL, "invariant");
-  _window_2 = new JfrProbabilityWindow();
+  _window_2 = new JfrProbabilitySamplerWindow();
   if (_window_2 == NULL) {
     return false;
   }
   assert(_window_3 == NULL, "invariant");
-  _window_3 = new JfrProbabilityWindow();
+  _window_3 = new JfrProbabilitySamplerWindow();
   if (_window_3 == NULL) {
     return false;
   }
   _active_window = _window_0;
   return true;
+}
+
+inline bool JfrSamplerWindow::is_derived() const {
+  return false;
+}
+
+// Maps an expired window to the next window to be installed, as a function of
+// the type of the just expired window and the configuration of the sampler.
+inline JfrSamplerWindow* JfrAdaptiveSampler::next_window(const JfrSamplerWindow* expired, bool probability /* false */) const {
+  assert(expired != NULL, "invariant");
+  if (expired->is_derived()) {
+    if (probability) {
+      // return the next probability window
+      return expired == _window_2 ? _window_3 : _window_2;
+    }
+    // return the next "regular" window
+    return expired == _window_2 ? _window_1 : _window_0;
+  }
+  if (probability) {
+    // return the next probability window
+    return expired == _window_0 ? _window_3 : _window_2;
+  }
+  // return the next "regular" window
+  return expired == _window_0 ? _window_1 : _window_0;
 }
 
 inline const JfrSamplerWindow* JfrAdaptiveSampler::active_window() const {
@@ -301,208 +309,177 @@ static double next_window_population_size(const JfrSamplerWindow* expired, doubl
   return exponentially_weighted_moving_average(expired->population_size(), alpha, avg_population_size);
 }
 
+// Randomly select the nth element in the interval, map it to its zero based index.
+inline size_t randomized_nth_selection_mod_value(size_t interval) {
+  assert(interval > 0, "invariant");
+  if (interval <= 1) {
+    return 0;
+  }
+  const double factor = next_random_uniform();
+  assert(factor >= 0.0, "invariant");
+  assert(factor <= 1.0, "invariant");
+  return round(factor * (interval - 1));
+}
+
 /*
  * Based on previous information, the sampler creates a future 'projection',
- * a speculation of what the situation will be for the next window.
- * Given this projection, parameters are set accordingly to collect
- * a sample set as close as possible to the target (set point), which
+ * a speculation of what the situation will be like for the next window.
+ * Given this projection, the parameters are set accordingly to collect
+ * a sample set that is as close as possible to the target (set point), which
  * is a function of the number of sample_points_per_window + accumulated debt.
  */
-void JfrAdaptiveSampler::set_rate(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+JfrSamplerWindow* JfrAdaptiveSampler::set_rate(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
   assert(params.sample_points_per_window != JfrSamplerParams::unused, "invariant");
-  assert(!_probability_mode, "invariant");
-  const size_t projected_sample_size = next_window_sample_size(params, expired);
-  if (projected_sample_size == 0) {
-    return;
+  assert(params.probability == JfrSamplerParams::unused, "invariant");
+  assert(params.nth_selection == JfrSamplerParams::unused, "invariant");
+  JfrSamplerWindow* const next = set_projected_sample_size(params, expired);
+  if (next->_projected_sample_size == 0) {
+    return next;
   }
-  JfrSamplerWindow* const next = next_window(expired);
-  assert(next != expired, "invariant");
   // _avg_population_size = next_window_population_size(expired, _ewma_population_size_alpha, _avg_population_size);
-  if (expired->population_size() > projected_sample_size) {
-    next->_sampling_interval = expired->population_size() / projected_sample_size;
-    // next->_nth_mod_value = randomized_nth_selection(next->_sampling_interval);
+  if (expired->population_size() > next->_projected_sample_size) {
+    next->_sampling_interval = expired->population_size() / next->_projected_sample_size;
+    // next->_nth_mod_value = randomized_nth_selection_mod_value(next->_sampling_interval);
   } else {
     next->_sampling_interval = 1;
     //next->_nth_mod_value = 0;
   }
   next->_nth_mod_value = 0;
-  // set_projected_population_size(projected_sample_size, next);
-  next->_projected_sample_size = projected_sample_size;
-  next->_projected_population_size = projected_sample_size * next->_sampling_interval;
+  return set_projected_population_size(next->_projected_sample_size, next);
+  // next->_projected_population_size = next->_projected_sample_size * next->_sampling_interval;
+  //return next;
 }
 
-size_t JfrAdaptiveSampler::next_window_sample_size(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+JfrSamplerWindow* JfrAdaptiveSampler::set_projected_sample_size(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool probability /* false */) {
   assert(params.sample_points_per_window != JfrSamplerParams::JfrSamplerParams::unused, "invariant");
-  if (params.sample_points_per_window == 0) {
-    next_window(expired)->_projected_population_size = 0;
-    return 0;
-  }
-  return params.sample_points_per_window + next_window_amortization(expired);
-}
-
-void JfrAdaptiveSampler::set_projected_population_size(size_t projected_sample_size, JfrSamplerWindow* next) {
-  assert(projected_sample_size > 0, "invariant");
+  JfrSamplerWindow* const next = next_window(expired, probability);
   assert(next != NULL, "invariant");
-  assert(next != active_window(), "invariant");
-  assert(next->_sampling_interval > 0, "invariant");
-  assert(next->_nth_mod_value < next->_sampling_interval, "invariant");
-  next->_projected_sample_size = projected_sample_size;
-  if (next->_nth_mod_value == 0) {
-    next->_projected_population_size = projected_sample_size * next->_sampling_interval;
-    return;
-  }
-  next->_projected_population_size = ((projected_sample_size - 1) * next->_sampling_interval) + next->_nth_mod_value;
+  assert(next != expired, "invariant");
+  next->_projected_sample_size = params.sample_points_per_window + next_window_amortization(expired);
+  return next;
 }
 
 /*
  * When the sampler is configured to maintain a rate, is employs the concepts
  * of 'debt' and 'accumulated debt'. 'Accumulated debt' can be thought of as
  * a cumulative error term, and is indicative for how much the sampler is
- * deviating from a set point (the rate). Debt accumulates naturally over time,
+ * deviating from a set point, i.e. the target rate. Debt accumulates naturally
  * as a function of undersampled windows, mainly because of system fluctuations,
  * i.e. too small populations.
  *
  * A specified rate is implicitly a _maximal_ rate, so the sampler must ensure
- * to respect this 'limit'. Rates are normalized to per-second ratios, so the
- * 'limit' to respect is on a per second basis.During this second, the sampler
+ * to respect this 'limit'. Rates are normalized as per-second ratios, hence the
+ * limit to respect is on a per second basis. During this second, the sampler
  * has freedom to dynamically re-adjust, and it does so by 'amortizing'
  * accumulated debt over a certain number of windows that fall within the second.
  *
  * Intuitively, accumulated debt 'carry over' from the predecessor to the successor
- * window iff within the allowable time frame (determined by _acc_debt_carry_limit).
- * The successor window will sample more points to make amends, or 'amortize' debt
- * accumulated by its predecessor(s).
+ * window if within the allowable time frame (determined in # of 'windows' given by
+ * _acc_debt_carry_limit). The successor window will sample more points to make amends,
+ * or 'amortize' debt accumulated by its predecessor(s).
  */
 size_t JfrAdaptiveSampler::next_window_amortization(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
-  const size_t accumulated_debt = -expired->accumulated_debt(); // negation
-  return accumulated_debt;
+  return -expired->accumulated_debt();
   /*
   if (_acc_debt_carry_count == _acc_debt_carry_limit) {
     _acc_debt_carry_count = 1;
     return 0;
   }
   ++_acc_debt_carry_count;
-  const size_t accumulated_debt = -expired->accumulated_debt(); // negation
-  return accumulated_debt;
-  /*
-  if (_acc_debt_carry_count == _acc_debt_carry_limit) {
-    return accumulated_debt;
-  }
-  return accumulated_debt / (_acc_debt_carry_limit - _acc_debt_carry_count);
+  return -expired->accumulated_debt(); // negation
   */
 }
 
-inline bool is_discrete_probability(double p, size_t* nth_selection) {
-  assert(nth_selection != NULL, "invariant");
-  assert(p >= 0.0, "invariant");
-  assert(p <= MAX_PROBABILITY, "invariant");
-  if (p == 0.0) return false;
-  const double p_interval = static_cast<double>(1) / p;
-  *nth_selection = p_interval;
-  return p_interval == static_cast<double>(*nth_selection);
+inline intptr_t JfrSamplerWindow::debt() const {
+  return static_cast<intptr_t>(sample_size() - _params.sample_points_per_window);
 }
 
-// Randomly select the nth element in the interval, map it to its zero based index.
-inline size_t randomized_nth_selection_mod_value(size_t interval) {
-  assert(interval > 0, "invariant");
-  if (interval == 1) {
-    return 0;
+inline intptr_t JfrSamplerWindow::accumulated_debt() const {
+  return static_cast<intptr_t>(_params.sample_points_per_window - max_sample_size()) + debt();
+}
+
+JfrSamplerWindow* JfrAdaptiveSampler::set_projected_population_size(size_t projected_sample_size, JfrSamplerWindow* next) {
+  assert(projected_sample_size > 0, "invariant");
+  assert(next != NULL, "invariant");
+  assert(next != active_window(), "invariant");
+  assert(next->_sampling_interval > 0, "invariant");
+  assert(next->_nth_mod_value < next->_sampling_interval, "invariant");
+  projected_sample_size -= next->_nth_mod_value != 0 ? 1 : 0;
+  next->_projected_population_size = (projected_sample_size * next->_sampling_interval) + next->_nth_mod_value;
+  return next;
+}
+
+JfrSamplerWindow* JfrAdaptiveSampler::set_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+  assert(params.probability != JfrSamplerParams::unused, "invariant");
+  assert(params.sample_points_per_window == JfrSamplerParams::unused, "invariant");
+  assert(params.nth_selection == JfrSamplerParams::unused, "invariant");
+  JfrProbabilitySamplerWindow* const next = static_cast<JfrProbabilitySamplerWindow*>(next_window(expired, true));
+  assert(next != expired, "invariant");
+  if (params.probability == 0.0) {
+    next->_projected_sample_size = 0;
+    return next;
   }
-  const double factor = next_random_uniform();
-  assert(factor <= 1.0, "invariant");
-  return factor * (interval - 1);
+  next->_projected_sample_size = MAX_SIZE_T;
+  next->set_probability(params.probability);
+  return next;
 }
 
-void JfrAdaptiveSampler::set_rate_and_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+JfrSamplerWindow* JfrAdaptiveSampler::set_rate_and_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
   assert(params.sample_points_per_window != JfrSamplerParams::unused, "invariant");
   assert(params.probability != JfrSamplerParams::unused, "invariant");
-  const size_t projected_sample_size = next_window_sample_size(params, expired);
-  if (projected_sample_size == 0) {
-    return;
+  assert(params.nth_selection == JfrSamplerParams::unused, "invariant");
+  JfrProbabilitySamplerWindow* const next = static_cast<JfrProbabilitySamplerWindow*>(set_projected_sample_size(params, expired, true));
+  assert(next != expired, "invariant");
+  if (next->_projected_sample_size == 0) {
+    return next;
   }
-  size_t probability_nth_selection;
-  if (is_discrete_probability(params.probability, &probability_nth_selection)) {
-    assert(probability_nth_selection > 0, "invariant");
-    // For discrete probabilities, we can use randomized nth selection.
-    JfrSamplerWindow* const next = next_window(expired);
-    next->_sampling_interval = probability_nth_selection;
-    next->_nth_mod_value = randomized_nth_selection_mod_value(probability_nth_selection);
-    set_projected_population_size(projected_sample_size, next);
-    return;
-  }
-  set_probability(params, projected_sample_size, expired);
+  next->set_probability(params.probability);
+  return next;
 }
 
-void JfrAdaptiveSampler::set_rate_and_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  assert(params.sample_points_per_window != JfrSamplerParams::unused, "invariant");
+JfrSamplerWindow* JfrAdaptiveSampler::set_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool randomize) {
   assert(params.nth_selection != JfrSamplerParams::unused, "invariant");
-  const size_t projected_sample_size = next_window_sample_size(params, expired);
-  if (projected_sample_size == 0) {
-    return;
-  }
+  assert(params.sample_points_per_window == JfrSamplerParams::unused, "invariant");
+  assert(params.probability == JfrSamplerParams::unused, "invariant");
+  // To keep the modulo consistent across window boundaries.
+  _next_window_initializer = expired->population_size() % expired->_sampling_interval;
   JfrSamplerWindow* const next = next_window(expired);
+  assert(next != expired, "invariant");
+  next->_projected_population_size = MAX_SIZE_T;
   next->_sampling_interval = params.nth_selection;
-  set_projected_population_size(projected_sample_size, next);
+  next->_nth_mod_value = randomize ? randomized_nth_selection_mod_value(params.nth_selection) : 0;
+  return next;
 }
 
-void JfrAdaptiveSampler::set_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  assert(params.nth_selection != JfrSamplerParams::unused, "invariant");
-  next_window(expired)->_sampling_interval = params.nth_selection;
-  // To keep a consistent modulo over the window boundary.
-  _initial_value_for_next_window = expired->_sampling_interval == 0 ? 0 :
-                                     expired->population_size() % expired->_sampling_interval;
-}
-
-// Continuous probabilities employ a Bernoulli trial.
-void JfrAdaptiveSampler::set_probability(const JfrSamplerParams& params, size_t projected_sample_size, const JfrSamplerWindow* expired) {
-  _probability_mode = true;
-  JfrProbabilityWindow* const next_prob_window = static_cast<JfrProbabilityWindow*>(next_window(expired));
-  next_prob_window->_max_sample_size = projected_sample_size;
-  next_prob_window->set_probability(params.probability);
-}
-
-void JfrAdaptiveSampler::set_probability(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  assert(params.probability != JfrSamplerParams::unused, "invariant");
-  size_t probability_nth_selection;
-  if (is_discrete_probability(params.probability, &probability_nth_selection)) {
-    assert(probability_nth_selection > 0, "invariant");
-    JfrSamplerWindow* const next = next_window(expired);
-    // For discrete probabilities, we can use randomized nth selection for better performance.
-    next->_sampling_interval = probability_nth_selection;
-    next->_nth_mod_value = randomized_nth_selection_mod_value(probability_nth_selection);
-    assert(next->_nth_mod_value < next->_sampling_interval, "invariant");
-    return;
-  }
-  set_probability(params, params.probability == 0 ? 0 : MAX_SIZE_T, expired);
-}
-
-void JfrAdaptiveSampler::set_probability_and_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  assert(params.probability != JfrSamplerParams::unused, "invariant");
-  assert(params.nth_selection != JfrSamplerParams::unused, "invariant");
-  const double nth_selection_probability = params.nth_selection != 0 ? static_cast<double>(1) / params.nth_selection : 0;
-  if (nth_selection_probability > params.probability) {
-    JfrSamplerWindow* const next = next_window(expired);
-    // Use randomized nth selection.
-    next->_sampling_interval = params.nth_selection;
-    next->_nth_mod_value = randomized_nth_selection_mod_value(params.nth_selection);
-    assert(next->_nth_mod_value < next->_sampling_interval, "invariant");
-    return;
-  }
-  set_probability(params, expired);
-}
-
-void JfrAdaptiveSampler::set_all(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
+JfrSamplerWindow* JfrAdaptiveSampler::set_rate_and_nth_selection(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool randomize) {
   assert(params.sample_points_per_window != JfrSamplerParams::unused, "invariant");
-  assert(params.probability != JfrSamplerParams::unused, "invariant");
   assert(params.nth_selection != JfrSamplerParams::unused, "invariant");
-  const double nth_selection_probability = params.nth_selection == 0 ? 0 :
-                                             static_cast<double>(1) / params.nth_selection;
-  if (nth_selection_probability >= params.probability) {
-    set_rate_and_nth_selection(params, expired);
-    return;
+  assert(params.probability == JfrSamplerParams::unused, "invariant");
+  JfrSamplerWindow* const next = set_projected_sample_size(params, expired);
+  if (next->_projected_sample_size == 0) {
+    return next;
   }
-  set_rate_and_probability(params, expired);
+  next->_sampling_interval = params.nth_selection;
+  next->_nth_mod_value = randomize ? randomized_nth_selection_mod_value(params.nth_selection) : 0;
+  return set_projected_population_size(next->_projected_sample_size, next);
+}
+
+inline double compute_ewma_alpha_coefficient(size_t lookback_count) {
+  return lookback_count <= 1 ? 1 : static_cast<double>(1) / static_cast<double>(lookback_count);
+}
+
+inline size_t compute_accumulated_debt_carry_limit(const JfrSamplerParams& params) {
+  if (params.window_duration_ms == 0 || params.window_duration_ms >= MILLIUNITS) {
+    return 1;
+  }
+  return MILLIUNITS / params.window_duration_ms;
+}
+
+void JfrAdaptiveSampler::install(const JfrSamplerWindow* next) {
+  assert(next != NULL, "invariant");
+  assert(next != active_window(), "invariant");
+  Atomic::release_store(&_active_window, next);
 }
 
 // Called exclusively by the holder of the try lock when a window is determined to have expired.
@@ -520,151 +497,168 @@ void JfrAdaptiveSampler::rotate_window(int64_t timestamp) {
   event.commit();
 }
 
-inline double compute_ewma_alpha_coefficient(size_t lookback_count) {
-  return lookback_count <= 1 ? 1 : static_cast<double>(1) / static_cast<double>(lookback_count);
-}
-
-inline size_t compute_accumulated_debt_carry_limit(const JfrSamplerParams& params) {
-  if (params.window_duration_ms == 0 || params.window_duration_ms >= MILLIUNITS) {
-    return 1;
-  }
-  return MILLIUNITS / params.window_duration_ms;
-}
-
 void JfrAdaptiveSampler::rotate(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
   assert(expired == active_window(), "invariant");
   install(configure(next_window_params(expired), expired));
 }
 
-void JfrAdaptiveSampler::reset_next_window(const JfrSamplerWindow* expired) {
-  next_window(expired)->reset(); // next similar window
-  if (expired->is_derived()) {
-    _probability_mode = false;
-    next_window(expired)->reset(); // next "regular" window
-    return;
-  }
-  _probability_mode = true;
-  next_window(expired)->reset(); // next "probability" window
-  _probability_mode = false;
-}
+static constexpr const u1 RATE = 1;
+static constexpr const u1 PROBABILITY = 2;
+static constexpr const u1 NTH_SELECTION = 4;
+static constexpr const u1 RATE_PROBABIILTY = RATE | PROBABILITY;
+static constexpr const u1 RATE_NTH_SELECTION = RATE | NTH_SELECTION;
 
 const JfrSamplerWindow* JfrAdaptiveSampler::configure(const JfrSamplerParams& params, const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
   assert(_lock, "invariant");
-
-  /*
-   * The adaptive sampler can be configured in three dimensions (all optional):
-   *
-   * - rate per second  sample dynamically to maintain a continuous, maximal rate per second
-   * - probability      sample using a probability
-   * - nth selection    sample by selecting every nth sample point
-   *
-   * If a rate is specified, the probability and/or nth selection becomes relative to the rate.
-   */
-
-  static const u1 RATE = 1;
-  static const u1 PROBABILITY = 2;
-  static const u1 NTH_SELECTION = 4;
-
-  #define RP  (RATE | PROBABILITY)
-  #define RN  (RATE | NTH_SELECTION)
-  #define PN  (PROBABILITY | NTH_SELECTION)
-  #define RPN (RATE | PROBABILITY | NTH_SELECTION)
-
+  //
+  // The adaptive sampler can be configured in three dimensions (all optional):
+  //
+  // - rate per second  sample dynamically to maintain a continuous, maximal rate per second
+  // - probability      sample using a probability
+  // - nth selection    sample by selecting every nth sample point
+  //
+  //
   // LEGEND
   //
   // R = "rate" option
   // P = "probability" option
   // N = "nth selection" option
   //
-  // The combinations comprise an n-set (a 3-set) = { R, P, N }
+  // The combinations comprise an n-set (a 3-set) = { R, P, N }, but the options for probability
+  // and nth selection are made mutually exclusive or disjoint after preprocessing.
+  // Therefore, the semantically valid combinations constitute only a strict subset of the power set.
   //
-  // Number of r-subsets = 4 (0, 1, 2, 3) (including null set)
+  // Number of r-subsets = 3 (0, 1, 2) (including null set)
   //
   // Unordered selection:
   //
   // C(3, 0) = {} = NULL set = 1
   // C(3, 1) = { (R), (P), (N) } = 3
-  // C(3, 2) = { (R, P), (R, N), (P, N) } = 3
-  // C(3, 3) = { (R, P, N) } = 1
+  // C(3, 2) = { (R, P), (R, N) } = 2
   //
-  // in shorter terms: P({ R, P, N }) = 8
+  // | P({ R, P, N }) \ { (P, N), (R, P, N) } | = 6
   //
-  static u1 options = 0;
-
+  static u1 subset = 0;
+  static bool randomize_nth_selection = false;
   if (params.reconfigure) {
-    _avg_population_size = 0;
-    _ewma_population_size_alpha = compute_ewma_alpha_coefficient(params.window_lookback_count);
-    _acc_debt_carry_limit = compute_accumulated_debt_carry_limit(params);
-    _acc_debt_carry_count = _acc_debt_carry_limit;
-    reset_next_window(expired);
-    assert(!_probability_mode, "invariant");
-    if (params.sample_points_per_window != JfrSamplerParams::unused) {
-      options |= RATE;
-    }
-    if (params.probability != JfrSamplerParams::unused) {
-      options |= PROBABILITY;
-    }
-    if (params.nth_selection != JfrSamplerParams::unused) {
-      options |= NTH_SELECTION;
-    }
-    params.reconfigure = false;
+    subset = configure(params, expired, &randomize_nth_selection);
+    assert(!params.reconfigure, "invariant");
   }
-
-  switch (options) {
+  JfrSamplerWindow* next = NULL;
+  switch (subset) {
     case RATE:
-      set_rate(params, expired);
-      break;
-    case NTH_SELECTION:
-      set_nth_selection(params, expired);
+      next = set_rate(params, expired);
       break;
     case PROBABILITY:
-      set_probability(params, expired);
+      next = set_probability(params, expired);
       break;
-    case RP:
-      set_rate_and_probability(params, expired);
+    case NTH_SELECTION:
+      next = set_nth_selection(params, expired, randomize_nth_selection);
       break;
-    case RN:
-      set_rate_and_nth_selection(params, expired);
+    case RATE_PROBABIILTY:
+      next = set_rate_and_probability(params, expired);
       break;
-    case PN:
-      set_probability_and_nth_selection(params, expired);
+    case RATE_NTH_SELECTION:
+      next = set_rate_and_nth_selection(params, expired, randomize_nth_selection);
       break;
-    case RPN:
-      set_all(params, expired);
+    case 0: // NULL set
+    default:
+      next = next_window(expired);
   }
-  JfrSamplerWindow* const next = next_window(expired);
-  assert(next != expired, "invariant");
-  next->initialize(params, _initial_value_for_next_window);
-  return next;
-
-  #undef RP
-  #undef RN
-  #undef PN
-  #undef RPN
-}
-
-void JfrAdaptiveSampler::install(const JfrSamplerWindow* next) {
   assert(next != NULL, "invariant");
-  assert(next != active_window(), "invariant");
-  Atomic::release_store(&_active_window, next);
+  assert(next != expired, "invariant");
+  next->initialize(params, _next_window_initializer);
+  return next;
 }
 
-inline JfrSamplerWindow* JfrAdaptiveSampler::next_window(const JfrSamplerWindow* expired) const {
-  assert(expired != NULL, "invariant");
+void JfrAdaptiveSampler::reset_next_window(const JfrSamplerWindow* expired) {
+  next_window(expired)->reset(); // next isomorphic window
   if (expired->is_derived()) {
-    if (_probability_mode) {
-      // return the next probability window
-      return expired == _window_2 ? _window_3 : _window_2;
+    next_window(expired)->reset(); // next "regular" window
+    return;
+  }
+  next_window(expired, true)->reset(); // next "probability" window
+}
+
+u1 JfrAdaptiveSampler::configure(const JfrSamplerParams& params, const JfrSamplerWindow* expired, bool* randomize_nth_selection) {
+  assert(params.reconfigure, "invariant");
+  assert(expired != NULL, "invariant");
+  assert(randomize_nth_selection != NULL, "invariant");
+  _next_window_initializer = 0;
+  reset_next_window(expired);
+  u1 subset = 0;
+  *randomize_nth_selection = false;
+  if (params.sample_points_per_window != JfrSamplerParams::unused) {
+    subset |= configure_rate(params);
+  }
+  if (params.probability != JfrSamplerParams::unused) {
+    subset |= configure_probability(params, randomize_nth_selection);
+  }
+  if (params.nth_selection != JfrSamplerParams::unused) {
+    assert(params.probability == JfrSamplerParams::unused, "not mutually exclusive");
+    subset |= NTH_SELECTION;
+  }
+  params.reconfigure = false;
+  return subset;
+}
+
+u1 JfrAdaptiveSampler::configure_rate(const JfrSamplerParams& params) {
+  assert(params.sample_points_per_window != JfrSamplerParams::unused, "invariant");
+  _avg_population_size = 0;
+  _ewma_population_size_alpha = compute_ewma_alpha_coefficient(params.window_lookback_count);
+  _acc_debt_carry_limit = compute_accumulated_debt_carry_limit(params);
+  _acc_debt_carry_count = _acc_debt_carry_limit;
+  return RATE;
+}
+
+u1 JfrAdaptiveSampler::configure_probability(const JfrSamplerParams& params, bool* randomize_nth_selection) const {
+  if (transform_probability_to_nth_selection(const_cast<JfrSamplerParams&>(params), randomize_nth_selection)) {
+    assert(params.probability == JfrSamplerParams::unused, "invariant");
+    assert(params.nth_selection != JfrSamplerParams::unused, "invariant");
+    // we'll use nth selection
+    return 0;
+  }
+  assert(params.nth_selection == JfrSamplerParams::unused, "invariant");
+  assert(params.probability != JfrSamplerParams::unused, "invariant");
+  return PROBABILITY;
+}
+
+static bool is_uniform_sample_space_discrete(double p, size_t* nth_selection) {
+  assert(nth_selection != NULL, "invariant");
+  assert(p >= 0.0, "invariant");
+  assert(p <= MAX_PROBABILITY, "invariant");
+  if (p == 0.0) {
+    *nth_selection = 0;
+    return true;
+  }
+  const double sample_space_size = static_cast<double>(1) / p;
+  *nth_selection = sample_space_size;
+  return sample_space_size == static_cast<double>(*nth_selection);
+}
+
+bool JfrAdaptiveSampler::transform_probability_to_nth_selection(JfrSamplerParams& params, bool* randomize_nth_selection) const {
+  assert(params.probability != JfrSamplerParams::unused, "invariant");
+  assert(randomize_nth_selection != NULL, "invariant");
+  assert(!*randomize_nth_selection, "invariant");
+  if (params.nth_selection != JfrSamplerParams::unused) {
+    const double nth_selection_probability = params.nth_selection == 0 ? 0 : static_cast<double>(1) / params.nth_selection;
+    if (nth_selection_probability > params.probability) {
+      // covered by nth selection
+      params.probability = JfrSamplerParams::unused;
+      *randomize_nth_selection = false;
+      return true;
     }
-    // return the next "regular" window
-    return expired == _window_2 ? _window_1 : _window_0;
+    // nth selection covered by probability
+    params.nth_selection = JfrSamplerParams::unused;
   }
-  if (_probability_mode) {
-    // return the next probability window
-    return expired == _window_0 ? _window_3 : _window_2;
+  size_t probability_nth_selection;
+  if (is_uniform_sample_space_discrete(params.probability, &probability_nth_selection)) {
+    params.nth_selection = static_cast<intptr_t>(probability_nth_selection);
+    params.probability = JfrSamplerParams::unused;
+    *randomize_nth_selection = true;
+    return true;
   }
-  // return the next "regular" window
-  return expired == _window_0 ? _window_1 : _window_0;
+  return false;
 }

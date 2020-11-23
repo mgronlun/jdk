@@ -154,10 +154,10 @@ public final class PlatformEventType extends Type {
         }
     }
 
-    public void setThrottle(long throttle) {
+    public void setThrottle(int ratePerSecond, double probability, int nthSelection) {
         if (isJVM) {
-            System.out.println("JVM.setThrottle: " + throttle);
-            JVM.getJVM().setThrottle(getId(), throttle);
+            System.out.println("JVM.setThrottle(" + ratePerSecond + ", " + probability + ", " + nthSelection + ")");
+            JVM.getJVM().setThrottle(getId(), ratePerSecond, probability, nthSelection);
         }
     }
 
@@ -230,7 +230,6 @@ public final class PlatformEventType extends Type {
     public void setThreshold(long thresholdNanos) {
         this.thresholdTicks = Utils.nanosToTicks(thresholdNanos);
         if (isJVM) {
-            System.out.println("Threshold: " + getId() + " value: " + thresholdTicks);
             JVM.getJVM().setThreshold(getId(), thresholdTicks);
         }
     }

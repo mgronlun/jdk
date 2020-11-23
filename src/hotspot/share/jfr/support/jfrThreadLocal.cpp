@@ -34,10 +34,10 @@
 #include "jfr/recorder/stacktrace/jfrStackTrace.hpp"
 #include "jfr/recorder/storage/jfrStorage.hpp"
 #include "jfr/support/jfrThreadLocal.hpp"
+#include "jfr/utilities/jfrRandom.inline.hpp"
 #include "memory/allocation.inline.hpp"
 #include "runtime/os.hpp"
 #include "runtime/thread.inline.hpp"
-#include "runtime/samplerSupport.hpp"
 #include "utilities/sizes.hpp"
 
 JfrThreadLocal::JfrThreadLocal() :
@@ -48,7 +48,7 @@ JfrThreadLocal::JfrThreadLocal() :
   _load_barrier_buffer_epoch_0(NULL),
   _load_barrier_buffer_epoch_1(NULL),
   _stackframes(NULL),
-  _sampler_support(NULL),
+  _pnrg(NULL),
   _trace_id(JfrTraceId::assign_thread_id()),
   _thread(),
   _data_lost(0),
@@ -145,9 +145,9 @@ void JfrThreadLocal::release(Thread* t) {
     _load_barrier_buffer_epoch_1->set_retired();
     _load_barrier_buffer_epoch_1 = NULL;
   }
-  if (_sampler_support != NULL) {
-    delete _sampler_support;
-    _sampler_support = NULL;
+  if (_pnrg != NULL) {
+    delete _pnrg;
+    _pnrg = NULL;
   }
 }
 
@@ -202,12 +202,6 @@ JfrStackFrame* JfrThreadLocal::install_stackframes() const {
   return _stackframes;
 }
 
-SamplerSupport* JfrThreadLocal::install_sampler_support() const {
-  assert(_sampler_support == NULL, "invariant");
-  _sampler_support = new SamplerSupport(true);
-  return _sampler_support;
-}
-
 ByteSize JfrThreadLocal::trace_id_offset() {
   return in_ByteSize(offset_of(JfrThreadLocal, _trace_id));
 }
@@ -230,4 +224,12 @@ void JfrThreadLocal::include(Thread* t) {
 
 u4 JfrThreadLocal::stackdepth() const {
   return _stackdepth != 0 ? _stackdepth : (u4)JfrOptionSet::stackdepth();
+}
+
+double JfrThreadLocal::next_random_uniform() const {
+  if (_pnrg == NULL) {
+    _pnrg = new JfrPNRG(this);
+  }
+  assert(_pnrg != NULL, "invariant");
+  return _pnrg->next_uniform();
 }

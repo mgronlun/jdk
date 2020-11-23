@@ -73,29 +73,40 @@ class JfrEventThrottlerSettingsLocker : public StackObj {
 };
 
 static const JfrSamplerParams _disabled_params = {
-                                                   JfrSamplerParams::unused,
-                                                   JfrSamplerParams::unused,
-                                                   JfrSamplerParams::unused,
-                                                   0,
-                                                   0,
-                                                   false
+                                                   JfrSamplerParams::unused, // rate
+                                                   JfrSamplerParams::unused, // probability
+                                                   JfrSamplerParams::unused, // nth selection
+                                                   0, // window duration
+                                                   0, // window lookback count
+                                                   false // reconfigure
                                                  };
 
 JfrEventThrottler::JfrEventThrottler(JfrEventId event_id) :
   JfrAdaptiveSampler(),
-  _semaphore(NULL),
-  _event_id(event_id),
   _last_params(_disabled_params),
+  _semaphore(NULL),
+  _probability(JfrSamplerParams::unused),
+  _rate_per_second(JfrSamplerParams::unused),
+  _nth_selection(JfrSamplerParams::unused),
+  _event_id(event_id),
   _disabled(false),
   _update(false) {}
+
+bool JfrEventThrottler::initialize() {
+  _semaphore = new Semaphore(1);
+  return _semaphore != NULL && JfrAdaptiveSampler::initialize();
+}
 
 JfrEventThrottler::~JfrEventThrottler() {
   delete _semaphore;
 }
 
-bool JfrEventThrottler::initialize() {
-  _semaphore = new Semaphore(1);
-  return _semaphore != NULL && JfrAdaptiveSampler::initialize();
+constexpr static const intptr_t event_throttler_disabled = -2;
+
+inline bool is_disabled(intptr_t rate_per_second, double probability, intptr_t nth_selection) {
+  return rate_per_second == event_throttler_disabled || rate_per_second == JfrSamplerParams::unused &&
+                                                        probability == JfrSamplerParams::unused &&
+                                                        nth_selection == JfrSamplerParams::unused;
 }
 
 /*
@@ -104,8 +115,6 @@ bool JfrEventThrottler::initialize() {
  * - rate per second  throttle dynamically to maintain a continuous, maximal rate per second
  * - probability      throttle using a probability
  * - nth selection    throttle by selecting every nth sample point
- *
- * If a rate is specified, the probability and / or nth selection becomes relative to the rate.
  */
 bool JfrEventThrottler::configure(intptr_t rate_per_second, double probability, intptr_t nth_selection) {
   JfrEventThrottlerSettingsLocker sl(this);
@@ -137,64 +146,59 @@ JfrEventThrottler* JfrEventThrottler::for_event(JfrEventId event_id) {
 bool JfrEventThrottler::accept(JfrEventId event_id, int64_t timestamp) {
   JfrEventThrottler* const throttler = for_event(event_id);
   assert(throttler != NULL, "invariant");
-  return throttler->sample(timestamp);
-  //return throttler->_disabled ? true : throttler->sample(timestamp);
+  return throttler->_disabled ? true : throttler->sample(timestamp);
 }
-
-const intptr_t event_throttler_disabled = -2;
-static const size_t default_window_duration_ms = 200;   // 5 windows per second
 
 /*
  * Rates lower than or equal to the 'low rate upper bound', are considered special.
  * They will use a window of duration one second, because the rates are so low they
  * do not justify the overhead of more frequent window rotations.
  */
-static const size_t low_rate_upper_bound = 9;
+constexpr static const intptr_t low_rate_upper_bound = 9;
+constexpr static const size_t default_window_duration_ms = 200;   // 5 windows per second
 
 /*
  * Breaks down an overall rate per second to a number of sample points per window.
  */
-inline void set_sample_points_per_window(JfrSamplerParams& params, int64_t rate_per_second, const JfrSamplerWindow* expired) {
+inline size_t sample_points_per_window(JfrSamplerParams& params, intptr_t rate_per_second, const JfrSamplerWindow* expired) {
   assert(rate_per_second != event_throttler_disabled, "invariant");
   assert(expired != NULL, "invariant");
   if (rate_per_second <= low_rate_upper_bound) {
-    params.sample_points_per_window = rate_per_second;
-    return;
+    return rate_per_second;
   }
   // Window duration is in milliseconds and the rate_is in sample points per second.
   const double rate_per_ms = static_cast<double>(rate_per_second) / static_cast<double>(MILLIUNITS);
-  params.sample_points_per_window = floor(rate_per_ms * default_window_duration_ms);
+  return rate_per_ms * default_window_duration_ms;
 }
 
 /*
- * The window_lookback_count states the history in number of windows to take into account
+ * The window_lookback_count defines the history in number of windows to take into account
  * when the JfrAdaptiveSampler engine is calcualting an expected weigthed moving average (EWMA).
  * It only applies to contexts where a rate is specified. Technically, it determines the alpha
  * coefficient in an EMWA formula.
  */
-static const size_t default_window_lookback_count = 25; // 25 windows == 5 seconds (for default window duration)
+constexpr static const size_t default_window_lookback_count = 25; // 25 windows == 5 seconds (for default window duration of 200 ms)
 
 inline void set_window_duration(JfrSamplerParams& params, const JfrSamplerWindow* expired) {
-  if (params.sample_points_per_window != JfrSamplerParams::unused && params.sample_points_per_window > low_rate_upper_bound) {
-    params.window_duration_ms = default_window_duration_ms;
-    params.window_lookback_count = default_window_lookback_count; // 5 seconds
+  if (params.sample_points_per_window <= low_rate_upper_bound) {
+    // For low rates or probability or nth selection.
+    params.window_duration_ms = MILLIUNITS; // 1 second
+    params.window_lookback_count = 5; // 5 windows == 5 seconds
     return;
   }
-  // Lower rates.
-  params.window_duration_ms = MILLIUNITS; // 1 second
-  params.window_lookback_count = 5; // 5 windows == 5 seconds
+  params.window_duration_ms = default_window_duration_ms;
+  params.window_lookback_count = default_window_lookback_count; // 5 seconds
 }
 
-const JfrSamplerParams& JfrEventThrottler::last_params(const JfrSamplerWindow* expired) {
+const JfrSamplerParams& JfrEventThrottler::update_params(const JfrSamplerWindow* expired) {
   JfrEventThrottlerSettingsLocker sl(this);
-  if (event_throttler_disabled == _rate_per_second) {
-    // The event throttler is "off".
-    _disabled = true;
+  _disabled = is_disabled(_rate_per_second, _probability, _nth_selection);
+  if (_disabled) {
     return _disabled_params;
   }
   _last_params.probability = _probability;
   _last_params.nth_selection = _nth_selection;
-  set_sample_points_per_window(_last_params, _rate_per_second, expired);
+  _last_params.sample_points_per_window = sample_points_per_window(_last_params, _rate_per_second, expired);
   set_window_duration(_last_params, expired);
   _last_params.reconfigure = true;
   _update = false;
@@ -214,7 +218,7 @@ const JfrSamplerParams& JfrEventThrottler::last_params(const JfrSamplerWindow* e
 const JfrSamplerParams& JfrEventThrottler::next_window_params(const JfrSamplerWindow* expired) {
   assert(expired != NULL, "invariant");
   if (_update) {
-    return last_params(expired); // Updates _last_params in-place.
+    return update_params(expired); // Updates _last_params in-place.
   }
   return _disabled ? _disabled_params : _last_params;
 }
