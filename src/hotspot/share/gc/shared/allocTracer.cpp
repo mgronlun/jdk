@@ -71,7 +71,7 @@ void AllocTracer::send_allocation_outside_tlab(Klass* klass, HeapWord* obj, size
 
 void AllocTracer::send_allocation_in_new_tlab(Klass* klass, HeapWord* obj, size_t tlab_size, size_t alloc_size, Thread* thread) {
   JFR_ONLY(JfrAllocationTracer tracer(obj, alloc_size, thread);)
-    EventObjectAllocationInNewTLAB event;
+  EventObjectAllocationInNewTLAB event;
   if (event.should_commit()) {
     event.set_objectClass(klass);
     event.set_allocationSize(alloc_size);

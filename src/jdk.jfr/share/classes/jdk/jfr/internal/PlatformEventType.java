@@ -144,7 +144,7 @@ public final class PlatformEventType extends Type {
     }
 
     public void setHasThrottle(boolean hasThrottle) {
-        this.hasThrottle= hasThrottle;
+        this.hasThrottle = hasThrottle;
     }
 
     public void setCutoff(long cutoffNanos) {

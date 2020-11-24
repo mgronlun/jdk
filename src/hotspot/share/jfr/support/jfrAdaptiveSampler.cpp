@@ -494,7 +494,7 @@ void JfrAdaptiveSampler::rotate_window(int64_t timestamp) {
   // debug(current, _avg_population_size);
   fill(event, current);
   rotate(current);
-  event.commit();
+  // event.commit();
 }
 
 void JfrAdaptiveSampler::rotate(const JfrSamplerWindow* expired) {

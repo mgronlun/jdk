@@ -31,7 +31,6 @@
 #include "jfr/recorder/service/jfrOptionSet.hpp"
 #include "jfr/recorder/repository/jfrRepository.hpp"
 #include "jfr/support/jfrThreadLocal.hpp"
-#include "gc/shared/allocTracer.hpp"
 #include "runtime/java.hpp"
 #include "runtime/thread.hpp"
 

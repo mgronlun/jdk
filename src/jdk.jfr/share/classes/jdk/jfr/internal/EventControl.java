@@ -93,13 +93,12 @@ public final class EventControl {
         if (eventType.hasThrottle()) {
             addControl(Throttle.NAME, defineThrottle(eventType));
         }
-
         addControl(Enabled.NAME, defineEnabled(eventType));
 
         ArrayList<AnnotationElement> aes = new ArrayList<>(eventType.getAnnotationElements());
-        remove(eventType, aes, Enabled.class);
         remove(eventType, aes, Threshold.class);
         remove(eventType, aes, Period.class);
+        remove(eventType, aes, Enabled.class);
         remove(eventType, aes, StackTrace.class);
         remove(eventType, aes, Cutoff.class);
         remove(eventType, aes, Throttle.class);
