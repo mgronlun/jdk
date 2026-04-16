@@ -38,28 +38,24 @@ import jdk.jfr.consumer.RecordingStream;
  * @run main/othervm jdk.jfr.api.consumer.streaming.TestMetadataReconstructionWithRetainedStringPool
  */
 public class TestMetadataReconstructionWithRetainedStringPool {
-
-    static final class EventA extends Event {
-        String text;
-    }
-
-    static final class EventB extends Event {
-        String text;
-    }
-
     /// Minimum string length required to trigger StringPool usage.
     /// Mirrors `jdk.jfr.internal.StringPool.MIN_LIMIT`.
     private static final int STRING_POOL_MIN_LIMIT = 16;
+    private static final String TEXT = "a".repeat(STRING_POOL_MIN_LIMIT + 1);;
+    private static final int EXPECTED_EVENTS = 3;
+
+    static final class EventA extends Event {
+        String text = TEXT;
+    }
+
+    static final class EventB extends Event {
+        String text = TEXT;
+    }
 
     public static void main(String... args) throws InterruptedException {
         var aEventsPosted = new CountDownLatch(1);
         var readyToPostEventB = new CountDownLatch(1);
-        var allEventsProcessed = new CountDownLatch(1);
-        int expectedEvents = 3;
-        var eventsRemaining = new AtomicInteger(expectedEvents);
-
-        // Condition 1: String length > STRING_POOL_MIN_LIMIT triggers CONSTANT_POOL encoding.
-        var text = "a".repeat(STRING_POOL_MIN_LIMIT + 1);
+        var remaining = new CountDownLatch(EXPECTED_EVENTS);
 
         try (var rs = new RecordingStream()) {
             rs.onEvent(e -> {
@@ -67,15 +63,11 @@ public class TestMetadataReconstructionWithRetainedStringPool {
                 if (textValue == null) {
                     throw new RuntimeException("e.getValue(\"text\") returned null");
                 }
-                int remaining = eventsRemaining.decrementAndGet();
+                remaining.countDown();
                 System.out.printf("Event #%d [%s]: text=%s%n",
-                        expectedEvents - remaining,
+                        EXPECTED_EVENTS - remaining.getCount(),
                         e.getEventType().getName(),
                         textValue);
-
-                if (remaining == 0) {
-                    allEventsProcessed.countDown();
-                }
             });
 
             rs.onFlush(() -> {
@@ -94,8 +86,8 @@ public class TestMetadataReconstructionWithRetainedStringPool {
             //              The second event finds the string in the pre-cache and adds it to the
             //              pool. A constant pool ID to the pooled string is encoded in the event.
             //
-            emit(new EventA(), text);
-            emit(new EventA(), text);
+            new EventA().commit();
+            new EventA().commit();
             aEventsPosted.countDown();
 
             // Condition 3: Wait for JFR flush.
@@ -105,19 +97,8 @@ public class TestMetadataReconstructionWithRetainedStringPool {
             // Load the second event type, EventB, AFTER the flush segment containing the two events of type EventA.
             // A new metadata description will be constructed, and we verify that the StringPool added in the previous
             // segment is still available for the EventB string pool reference to be resolved correctly.
-            emit(new EventB(), text);
-
-            allEventsProcessed.await();
+            new EventB().commit();
+            remaining.await();
         }
-    }
-
-    private static void emit(Event event, String text) {
-        if (event instanceof EventA a) {
-            a.text = text;
-        }
-        if (event instanceof EventB b) {
-            b.text = text;
-        }
-        event.commit();
     }
 }
