@@ -41,8 +41,10 @@ public class TestMetadataReconstructionWithRetainedStringPool {
     /// Minimum string length required to trigger StringPool usage.
     /// Mirrors `jdk.jfr.internal.StringPool.MIN_LIMIT`.
     private static final int STRING_POOL_MIN_LIMIT = 16;
-    private static final String TEXT = "a".repeat(STRING_POOL_MIN_LIMIT + 1);;
     private static final int EXPECTED_EVENTS = 3;
+
+    // Condition 1: String length > STRING_POOL_MIN_LIMIT triggers CONSTANT_POOL encoding.
+    private static final String TEXT = "a".repeat(STRING_POOL_MIN_LIMIT + 1);;
 
     static final class EventA extends Event {
         String text = TEXT;
