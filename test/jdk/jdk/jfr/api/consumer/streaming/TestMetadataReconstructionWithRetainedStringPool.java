@@ -63,11 +63,11 @@ public class TestMetadataReconstructionWithRetainedStringPool {
 
         try (var rs = new RecordingStream()) {
             rs.onEvent(e -> {
-                int remaining = eventsRemaining.decrementAndGet();
                 String textValue = e.getValue("text");
                 if (textValue == null) {
                     throw new RuntimeException("e.getValue(\"text\") returned null");
                 }
+                int remaining = eventsRemaining.decrementAndGet();
                 System.out.printf("Event #%d [%s]: text=%s%n",
                         expectedEvents - remaining,
                         e.getEventType().getName(),
@@ -102,8 +102,8 @@ public class TestMetadataReconstructionWithRetainedStringPool {
             //              The default flush period is ~1 second.
             readyToPostEventB.await();
 
-            // Load the second event type, EventB, AFTER the flush segment containing the two EventA events.
-            // A new metadata description will be constructed, and we verify that the StringPool reference added in the previous
+            // Load the second event type, EventB, AFTER the flush segment containing the two events of type EventA.
+            // A new metadata description will be constructed, and we verify that the StringPool added in the previous
             // segment is still available for the EventB string pool reference to be resolved correctly.
             emit(new EventB(), text);
 
